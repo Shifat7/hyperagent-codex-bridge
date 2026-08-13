@@ -48,6 +48,7 @@ Complete the browser OAuth consent with the Hyperagent account whose credits sho
 hacb doctor
 hacb models
 hacb status
+hacb demo
 ```
 
 Do not proceed unless OAuth, reachable agents, local bridge, and Codex profile all pass.
@@ -124,7 +125,7 @@ hacb budget
 hacb app-status
 ```
 
-Require v0.4.1+, low relay effort, a hard Hyperagent per-run USD cap, and remaining local daily budget. Never raise `maxRequestsPerDay`, context limits, forwarded-tool limits, or reasoning effort without the user's explicit approval after reviewing actual credit usage. Keep multi-agent tools blocked for relay sessions.
+Require v0.5.0+, low relay effort, a hard Hyperagent per-run USD cap, and remaining local daily budget. Never raise `maxRequestsPerDay`, context limits, forwarded-tool limits, or reasoning effort without the user's explicit approval after reviewing actual credit usage. Keep multi-agent tools blocked for relay sessions.
 
 ## Prove routing and billing
 
@@ -132,11 +133,14 @@ Run a controlled prompt, then inspect sanitized receipts:
 
 ```bash
 hacb audit 12
+hacb receipt 24
 ```
 
 A successful turn records `request`, `thread_created`, and `completed` events with model and Hyperagent thread IDs. The audit log never stores prompts, answers, or tokens.
 
 For billing proof, note Hyperagent credits before and after a controlled request. Confirm Hyperagent usage changes and Codex subscription quota does not.
+
+Run the no-credit harness proof first with `hacb demo`. A paid controlled proof requires `hacb demo --live --confirm-spend`; do not bypass its budget check.
 
 ## Troubleshooting
 
@@ -165,7 +169,7 @@ App is still showing a normal OpenAI model:
 
 1. Do not send a prompt.
 2. Run `hacb app-status`.
-3. Confirm `hacb` is version 0.4.1 or newer. v0.4.0 must not be used because it lacks cost caps and context stripping.
+3. Confirm `hacb` is version 0.5.0 or newer. v0.4.0 must not be used because it lacks cost caps and context stripping.
 4. Fully quit the app with `Cmd+Q` on macOS or Exit on Windows.
 5. Reopen and create a new chat.
 

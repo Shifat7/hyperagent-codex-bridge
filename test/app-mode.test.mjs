@@ -18,7 +18,8 @@ test('App Mode safely activates, is idempotent, and restores original defaults',
   process.env.CODEX_HOME = join(root, 'codex');
   const config = {
     ...structuredClone(DEFAULT_CONFIG),
-    localApiToken: 'app-mode-local-token-12345678901234567890'
+    localApiToken: 'app-mode-local-token-12345678901234567890',
+    aliases: { 'hyperagent/codex-relay-sol': agents[0].id }
   };
   const original = [
     'model = "gpt-5.5"',

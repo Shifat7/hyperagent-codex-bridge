@@ -33,7 +33,8 @@ test('real Codex CLI accepts generated profile, catalog, auth, and Responses SSE
   const config = {
     ...structuredClone(DEFAULT_CONFIG),
     bridgePort: 0,
-    localApiToken: 'codex-e2e-local-token-12345678901234567890'
+    localApiToken: 'codex-e2e-local-token-12345678901234567890',
+    aliases: { 'hyperagent/sol-coder': agent.id }
   };
   let relayPrompt = '';
   let sampleCount = 0;
@@ -107,7 +108,8 @@ test('real Codex CLI uses App Mode from main config without a profile flag', { s
   const config = {
     ...structuredClone(DEFAULT_CONFIG),
     bridgePort: 0,
-    localApiToken: 'codex-app-local-token-12345678901234567890'
+    localApiToken: 'codex-app-local-token-12345678901234567890',
+    aliases: { 'hyperagent/sol-coder': agent.id }
   };
   const factory = () => ({
     async listAgents() { return [agent]; },

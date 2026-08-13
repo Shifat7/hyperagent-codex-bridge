@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 export const APP_NAME = 'hyperagent-codex-bridge';
-export const VERSION = '0.4.1';
+export const VERSION = '0.5.0';
 export const DEFAULT_MCP_URL = 'https://hyperagent.com/api/mcp';
 export const DEFAULT_ISSUER = 'https://hyperagent.com';
 export const DEFAULT_BRIDGE_PORT = 47831;
@@ -58,7 +58,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   runTimeoutMs: 30 * 60 * 1000,
   aliases: {},
   defaultAgentId: null,
-  exposeAllAgents: true,
+  exposeAllAgents: false,
   codexProviderId: 'hyperagent_credits',
   localApiToken: null,
   defaultReasoningEffort: 'low',
@@ -69,7 +69,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxConversationTurns: 8,
   maxForwardedTools: 32,
   maxPromptChars: 70000,
-  blockMultiAgentTools: true
+  blockMultiAgentTools: true,
+  strictRelayProtocol: true
 });
 
 export async function ensureStateDir() {

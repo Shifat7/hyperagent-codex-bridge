@@ -6,6 +6,7 @@ import {
   extractClientTools,
   modelInfo,
   parseRelayOutput,
+  RelayProtocolError,
   resolveAgent,
   slugify,
   sseEvents
@@ -27,6 +28,11 @@ test('aliases and generated slugs resolve to agents', () => {
   assert.equal(resolveAgent('hyperagent/sol', agents, config).id, agents[0].id);
   assert.equal(resolveAgent('hyperagent/fable-coder', agents, config).id, agents[1].id);
   assert.throws(() => resolveAgent('hyperagent/missing', agents, config), /Unknown Hyperagent model/);
+  assert.throws(
+    () => resolveAgent('hyperagent/missing', agents, { aliases: {}, defaultAgentId: agents[0].id }),
+    /Unknown Hyperagent model/,
+    'explicit unknown routes must never silently fall back'
+  );
 });
 
 test('relay prompt strips injected context, bounds history, and defaults to low effort', () => {
@@ -87,7 +93,33 @@ test('relay output maps final and tool calls', () => {
     parseRelayOutput('{"type":"tool_search_call","arguments":{"query":"Chrome control"}}', [{ type: 'tool_search', name: 'tool_search' }]),
     { type: 'tool_search_call', arguments: { query: 'Chrome control' } }
   );
-  assert.deepEqual(parseRelayOutput('plain answer'), { type: 'final', text: 'plain answer' });
+  assert.throws(() => parseRelayOutput('plain answer'), error => error instanceof RelayProtocolError && error.code === 'relay_invalid_json');
+  assert.deepEqual(parseRelayOutput('plain answer', [], { strict: false }), { type: 'final', text: 'Hyperagent relay protocol error (relay_invalid_json).' });
+});
+
+test('relay protocol extracts a single fenced action and validates tool arguments', () => {
+  const tools = [{
+    type: 'function',
+    name: 'shell',
+    parameters: {
+      type: 'object',
+      required: ['command'],
+      additionalProperties: false,
+      properties: { command: { type: 'string' } }
+    }
+  }];
+  assert.deepEqual(
+    parseRelayOutput('```json\n{"type":"function_call","name":"shell","arguments":{"command":"pwd"}}\n```', tools),
+    { type: 'function_call', name: 'shell', arguments: '{"command":"pwd"}' }
+  );
+  assert.throws(
+    () => parseRelayOutput('{"type":"function_call","name":"shell","arguments":{"cmd":"pwd"}}', tools),
+    error => error instanceof RelayProtocolError && error.code === 'relay_arguments_schema_mismatch'
+  );
+  assert.throws(
+    () => parseRelayOutput('{"type":"function_call","name":"invented","arguments":{}}', tools),
+    error => error instanceof RelayProtocolError && error.code === 'relay_unknown_tool'
+  );
 });
 
 test('Codex model metadata and SSE fixtures include required fields', () => {

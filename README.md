@@ -11,7 +11,7 @@ A local OAuth bridge that exposes your named Hyperagent agents as a Codex custom
 No private browser tokens or undocumented Hyperagent endpoints are used.
 
 > [!IMPORTANT]
-> Upgrade from v0.4.0 immediately. That release forwarded too much Codex App context and had no local request ceiling, which could consume credits quickly. v0.4.1 strips injected context, defaults to low effort, blocks recursive multi-agent tools, and enforces a persistent daily request cap.
+> Do not use v0.4.0. v0.4.1 added cost rails; v0.5.0 adds fail-closed typed relay actions, pinned routes, request-level latency receipts, and a no-credit real-Codex demo.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ The bridge maps Codex function/custom-tool calls back to Codex, so shell command
 
 ## Proof of work
 
-Release 0.4.0 is validated by an automated suite plus real Codex 0.144.6:
+The v0.5.0 candidate is validated by 27 tests plus real Codex 0.144.6:
 
 - OAuth discovery, PKCE, refresh-token rotation, and MCP session handling;
 - Codex Responses SSE compatibility;
@@ -36,12 +36,16 @@ Release 0.4.0 is validated by an automated suite plus real Codex 0.144.6:
 - reversible Codex App Mode from the main config without `--profile`;
 - local bearer authentication, rollback, and sanitized routing audit receipts;
 - secret scan and archive integrity checks.
+- a one-command, zero-credit real-Codex local shell round trip;
+- deterministic failures for invalid relay JSON, tools, and arguments;
+- request-correlated latency receipts with explicit cost-data status.
 
 The public proof target is `hacb audit`: each successful turn produces model and Hyperagent thread IDs without storing prompts, answers, or credentials.
 
-## Public release
+## Releases
 
 - Source: <https://github.com/clutchpbcfo/hyperagent-codex-bridge>
+- Latest public release: v0.4.1. The v0.5.0 candidate in this worktree is not published.
 - v0.4.1 ZIP: <https://pub.hyperagent.com/api/published/pbf01KY113X74_6VET28JJ1EW8HQ3Y/hyperagent-codex-bridge-0.4.1.zip>
 - SHA-256: <https://pub.hyperagent.com/api/published/pbf01KY113X7F_N3C8P93EZF3ZAEG7/hyperagent-codex-bridge-0.4.1.sha256>
 
@@ -83,10 +87,11 @@ codex --profile hyperagent
 
 ## Add a stable model alias
 
-List reachable models and agent IDs:
+List pinned routes, or discover all reachable candidate agents:
 
 ```bash
 hacb models
+hacb models --all
 ```
 
 Add a short alias:
@@ -104,14 +109,22 @@ You can also pass an exact agent name instead of its ID if the name is unique.
 hacb doctor
 hacb status
 curl http://127.0.0.1:47831/health
-codex --profile hyperagent
+hacb demo
 ```
 
-In Codex, send a small test such as: `Reply with exactly: hyperagent route works.` Then compare your Hyperagent credit/usage view before and after the run. The response includes an `X-Hyperagent-Thread-Id` header and response metadata so the run can be traced to its Hyperagent thread.
+`hacb demo` drives the real Codex binary through a deterministic local shell-tool round trip without calling Hyperagent or spending credits.
+
+After doctor passes and at least two daily requests remain, run the controlled paid proof explicitly:
+
+```bash
+hacb demo --live --confirm-spend
+```
+
+Then compare your Hyperagent credit/usage view before and after the run. The supported MCP result does not expose machine-readable per-request cost.
 
 ## Codex App Mode
 
-The Codex desktop app does not currently expose CLI profiles as first-class provider choices. v0.4.1 includes a reversible App Mode that makes the Hyperagent bridge the default in the main Codex config so **new app chats** use Hyperagent credits:
+The Codex desktop app does not currently expose CLI profiles as first-class provider choices. v0.5.0 includes a reversible App Mode that makes the Hyperagent bridge the default in the main Codex config so **new app chats** use Hyperagent credits:
 
 ```bash
 hacb app-on hyperagent/codex-relay-sol
@@ -130,6 +143,7 @@ Check the current state and recent sanitized routing receipts:
 ```bash
 hacb app-status
 hacb audit 12
+hacb receipt 24
 ```
 
 The audit log records timestamps, model IDs, Hyperagent thread IDs, and completion type, but never prompts, outputs, or tokens. It is the proof that a Codex App turn traversed the bridge.
@@ -183,7 +197,7 @@ CLI mode leaves `~/.codex/config.toml` defaults untouched and uses `~/.codex/hyp
 
 ## Cost controls
 
-v0.4.1 fails closed by default:
+v0.5.0 fails closed by default:
 
 - low reasoning effort;
 - six Hyperagent sampling requests per UTC day;
@@ -194,6 +208,9 @@ v0.4.1 fails closed by default:
 - 70,000-character final prompt ceiling;
 - multi-agent delegation tools blocked;
 - client-requested effort escalation ignored unless explicitly enabled.
+- invalid relay JSON, invented tools, and schema-invalid arguments rejected with typed errors;
+- unknown model slugs rejected instead of silently falling back;
+- pinned aliases exposed by default, with discovery opt-in via `hacb models --all`.
 
 Check the local ceiling before work:
 
@@ -222,8 +239,10 @@ These controls do not replace the Hyperagent agent-level budget. Configure each 
 3. **No true token streaming from Hyperagent MCP.** The bridge sends SSE keepalives, then returns the completed Hyperagent response.
 4. **Text-first input.** Image URLs are described to the Hyperagent agent, not uploaded automatically.
 5. **Codex Desktop model picker bug.** Current Codex Desktop builds may label custom provider models as `Custom` or hide them. The CLI/profile still sends the configured model ID correctly. Use `hacb profile <model-id>` or `codex --profile hyperagent -m <model-id>` when the picker is unreliable.
-6. **Tool-call quality depends on the selected agent.** Its prompt should emphasize exact JSON tool selection and local Codex tool use. The bridge falls back to plain final text if the agent does not follow the relay schema.
+6. **Tool-call quality depends on the selected agent.** Its prompt should emphasize exact JSON tool selection and local Codex tool use. v0.5.0 detects and fails malformed relay actions; it cannot make a weak model reason better.
 7. **This is an adapter, not a Hyperagent product feature.** A future official Hyperagent Responses gateway would be faster and should replace this bridge.
+8. **No per-request cost field from supported MCP.** Receipts measure request count and latency; exact cost still requires an operator-observed Hyperagent credit delta.
+9. **Windows UI proof remains outstanding.** The portable suite runs on Windows CI, but a physical Windows Codex App screenshot has not been captured for v0.5.0.
 
 ## Sources
 

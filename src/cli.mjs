@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { open, readFile, rm } from 'node:fs/promises';
+import { open, readFile, rm, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { activateAppMode, appModeStatus, deactivateAppMode } from './app-mode.mjs';
 import { BridgeServer } from './bridge.mjs';
@@ -26,6 +26,8 @@ import {
 } from './install.mjs';
 import { getAccessToken, invalidateTokens, login } from './oauth.mjs';
 import { buildAgentModels, slugify } from './protocol.mjs';
+import { buildReceipt, readAuditEntries, receiptMarkdown } from './receipts.mjs';
+import { runLiveDemo, runLocalDemo } from './demo.mjs';
 
 const command = process.argv[2] || 'help';
 const args = process.argv.slice(3);
@@ -39,19 +41,24 @@ Usage:
   hacb install-skill         Install the bundled Codex skill into CODEX_HOME/skills
   hacb login [--no-browser]  Authorize this bridge with Hyperagent
   hacb logout                Remove locally stored Hyperagent OAuth tokens
-  hacb models                List model IDs exposed to Codex
+  hacb models [--all] [--json]
+                            List pinned routes; --all discovers candidates
   hacb alias <slug> <agent>  Add a stable model alias mapped to an agent ID or name
   hacb profile [model]       Regenerate the Codex hyperagent profile
   hacb app-on [model]        Make Hyperagent the default for new Codex App chats
   hacb app-off               Restore normal App defaults; keep old bridge chats resumable
   hacb app-status            Show whether Codex App mode is active
   hacb audit [count]         Show recent sanitized bridge routing receipts
+  hacb receipt [count]       Emit a publishable latency/routing receipt
+  hacb demo                  Run a no-credit real-Codex local tool-loop demo
+  hacb demo --live --confirm-spend
+                            Run the controlled route through Hyperagent credits
   hacb budget                Show the local daily Hyperagent request cap
   hacb serve                 Run the local bridge in the foreground
   hacb start                 Run the local bridge in the background
   hacb stop                  Stop the background bridge
   hacb status                Show bridge status
-  hacb doctor                Check OAuth, agents, bridge, and Codex profile
+  hacb doctor [--json]       Check security, OAuth, routes, bridge, and Codex
   hacb uninstall-profile     Remove only the generated Codex profile
 
 Run Codex with Hyperagent credits:
@@ -70,7 +77,7 @@ async function listAgents(config) {
   }
 }
 
-async function printModels(config) {
+async function printModels(config, { json = false, all = false } = {}) {
   const agents = await listAgents(config);
   const models = buildAgentModels(agents);
   const byId = new Map(agents.map(agent => [agent.id, agent]));
@@ -78,10 +85,17 @@ async function printModels(config) {
     ...Object.entries(config.aliases || {})
       .filter(([, id]) => byId.has(id))
       .map(([slug, id]) => ({ slug, agent: byId.get(id), alias: true })),
-    ...(config.exposeAllAgents ? models.map(item => ({ slug: item.slug, agent: item.agent, alias: false })) : [])
+    ...((all || config.exposeAllAgents) ? models.map(item => ({ slug: item.slug, agent: item.agent, alias: false })) : [])
   ];
   if (!rows.length) {
-    console.log('No exposed models. Add an alias or enable exposeAllAgents.');
+    if (json) console.log(JSON.stringify({ models: [] }, null, 2));
+    else console.log('No exposed models. Add an alias or enable exposeAllAgents.');
+    return;
+  }
+  if (json) {
+    console.log(JSON.stringify({
+      models: rows.map(row => ({ model: row.slug, agent: row.agent.name, agentId: row.agent.id, underlyingModel: row.agent.model || null, route: row.alias ? 'alias' : 'generated' }))
+    }, null, 2));
     return;
   }
   console.log('MODEL ID'.padEnd(46), 'HYPERAGENT AGENT'.padEnd(30), 'AGENT ID');
@@ -140,14 +154,39 @@ async function stopBackground() {
   }
 }
 
-async function runDoctor(config) {
+function commandOutput(commandName, commandArgs) {
+  return new Promise(resolve => {
+    const child = spawn(commandName, commandArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    child.stdout.on('data', chunk => { text += chunk; });
+    child.stderr.on('data', chunk => { text += chunk; });
+    child.on('error', () => resolve(null));
+    child.on('close', code => resolve(code === 0 ? text.trim() : null));
+  });
+}
+
+async function runDoctor(config, { json = false } = {}) {
   let failed = false;
+  const checks = [];
   const report = (ok, label, detail = '') => {
-    console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `: ${detail}` : ''}`);
+    checks.push({ ok, label, detail });
+    if (!json) console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `: ${detail}` : ''}`);
     if (!ok) failed = true;
   };
   report(Number(process.versions.node.split('.')[0]) >= 20, 'Node.js 20+', process.version);
+  const codexVersion = await commandOutput(process.env.CODEX_BIN || 'codex', ['--version']);
+  report(Boolean(codexVersion), 'Codex CLI', codexVersion || 'not found');
+  report(config.bridgeHost === '127.0.0.1', 'Loopback-only bridge', config.bridgeHost);
+  report(config.mcpUrl === 'https://hyperagent.com/api/mcp', 'Supported Hyperagent MCP endpoint', config.mcpUrl);
+  report(config.issuer === 'https://hyperagent.com', 'OAuth issuer binding', config.issuer);
+  report(Array.isArray(config.scopes) && config.scopes.length === 3 && ['threads:read', 'threads:write', 'offline_access'].every(scope => config.scopes.includes(scope)), 'Least-privilege OAuth scopes', (config.scopes || []).join(', '));
   report(typeof config.localApiToken === 'string' && config.localApiToken.length >= 32, 'Local bridge bearer token', 'stored in protected config');
+  try {
+    const mode = (await stat(stateDir())).mode & 0o777;
+    report(process.platform === 'win32' || mode === 0o700, 'Private state directory permissions', process.platform === 'win32' ? 'Windows ACLs apply' : mode.toString(8));
+  } catch (error) {
+    report(false, 'Private state directory permissions', error.message);
+  }
   const budget = await getDailyBudgetStatus(config);
   report(budget.remaining > 0, 'Daily request budget', `${budget.used}/${budget.limit} used, ${budget.remaining} remaining`);
   try {
@@ -159,18 +198,23 @@ async function runDoctor(config) {
   try {
     const agents = await listAgents(config);
     report(agents.length > 0, 'Reachable named agents', String(agents.length));
+    const agentIds = new Set(agents.map(agent => agent.id));
+    const staleAliases = Object.entries(config.aliases || {}).filter(([, id]) => !agentIds.has(id)).map(([slug]) => slug);
+    report(staleAliases.length === 0, 'Pinned model routes', staleAliases.length ? `stale: ${staleAliases.join(', ')}` : `${Object.keys(config.aliases || {}).length} aliases valid`);
   } catch (error) {
     report(false, 'Reachable named agents', error.message);
   }
   const health = await waitForHealth(config, 750);
   report(health, 'Local bridge', health ? `127.0.0.1:${config.bridgePort}` : 'run hacb start');
   try {
-    await readFile(codexProfilePath(), 'utf8');
-    report(true, 'Codex profile', codexProfilePath());
+    const profileText = await readFile(codexProfilePath(), 'utf8');
+    report(profileText.includes('wire_api = "responses"') && profileText.includes('model_provider = "hyperagent_credits"'), 'Codex Responses profile', codexProfilePath());
   } catch {
     report(false, 'Codex profile', 'run hacb profile');
   }
+  if (json) console.log(JSON.stringify({ version: VERSION, ok: !failed, checks }, null, 2));
   process.exitCode = failed ? 1 : 0;
+  return { ok: !failed, checks };
 }
 
 async function main() {
@@ -207,7 +251,7 @@ async function main() {
       console.log('Removed locally stored Hyperagent OAuth tokens. Revoke the connection in Hyperagent settings if desired.');
       break;
     case 'models':
-      await printModels(config);
+      await printModels(config, { json: args.includes('--json'), all: args.includes('--all') });
       break;
     case 'alias': {
       const [slugRaw, agentRef] = args;
@@ -277,11 +321,20 @@ async function main() {
           item.model || '',
           item.threadId || '',
           item.outputType || '',
+          item.requestId || '',
           item.promptChars ? `promptChars=${item.promptChars}` : '',
+          Number.isFinite(item.totalMs) ? `totalMs=${item.totalMs}` : '',
           item.dailyUsed ? `daily=${item.dailyUsed}/${item.dailyLimit}` : '',
-          item.error || ''
+          item.errorCode || ''
         ].filter(Boolean).join('  '));
       }
+      break;
+    }
+    case 'receipt': {
+      const count = Math.min(500, Math.max(1, Number(args.find(value => /^\d+$/.test(value)) || 24)));
+      const receipt = buildReceipt(await readAuditEntries(count * 3), { includeThreadIds: args.includes('--include-thread-ids') });
+      if (args.includes('--json')) console.log(JSON.stringify(receipt, null, 2));
+      else console.log(receiptMarkdown(receipt).trimEnd());
       break;
     }
     case 'budget': {
@@ -290,16 +343,40 @@ async function main() {
       console.log('Each Codex tool loop can consume multiple Hyperagent requests. Change maxRequestsPerDay only after reviewing credits.');
       break;
     }
+    case 'demo': {
+      const live = args.includes('--live');
+      if (live) await startBackground(config);
+      const result = live
+        ? await runLiveDemo(config, { confirmSpend: args.includes('--confirm-spend') })
+        : await runLocalDemo();
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
     case 'setup': {
       const installed = await installCommand();
       console.log(`Installed command: ${installed.launcher}`);
       const skill = await installSkill();
       console.log(`Installed Codex skill: ${skill.target}`);
       await login(config, { launchBrowser: !args.includes('--no-browser') });
+      if (!Object.keys(config.aliases || {}).length) {
+        const agents = await listAgents(config);
+        const relayCandidates = agents.filter(agent => /(?:^|\s)relay(?:\s|$)/i.test(agent.name));
+        if (relayCandidates.length !== 1) {
+          throw new Error(`Setup found ${relayCandidates.length} clearly named relay agents. Run 'hacb models --all', then 'hacb alias <slug> <exact-agent-id>' before creating a profile.`);
+        }
+        config.aliases = { 'hyperagent/default': relayCandidates[0].id };
+        config.defaultAgentId = relayCandidates[0].id;
+        config.exposeAllAgents = false;
+        await saveConfig(config);
+        console.log(`Pinned hyperagent/default to ${relayCandidates[0].name}.`);
+      }
       const profile = await installCodexProfile(config);
       console.log(`Wrote Codex profile: ${profile.profile}`);
       await startBackground(config);
-      console.log(`Ready. Start Codex with: codex --profile hyperagent`);
+      const doctor = await runDoctor(config, { json: false });
+      if (!doctor.ok) throw new Error('Setup completed but verification failed. Fix the failed checks before using credits.');
+      console.log('Ready. Prove the local harness without spending credits: hacb demo');
+      console.log('Then start Codex with: codex --profile hyperagent');
       break;
     }
     case 'serve': {
@@ -332,7 +409,7 @@ async function main() {
       break;
     }
     case 'doctor':
-      await runDoctor(config);
+      await runDoctor(config, { json: args.includes('--json') });
       break;
     case 'uninstall-profile': {
       const result = await uninstallCodexProfile();

@@ -1,6 +1,6 @@
 {
   "name": "hyperagent-codex-bridge",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Local OAuth bridge that exposes Hyperagent agents as a Codex Responses-compatible provider.",
   "type": "module",
   "bin": {
@@ -8,6 +8,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:codex": "CODEX_BIN=codex node --test",
+    "release:verify": "node ./scripts/verify-release.mjs",
+    "release:build": "node ./scripts/build-release.mjs",
     "start": "node ./src/cli.mjs serve",
     "doctor": "node ./src/cli.mjs doctor"
   },

@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { appendAudit, consumeDailyRequestBudget, VERSION } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
@@ -32,6 +32,13 @@ function apiError(response, status, message, code = 'bridge_error', headers = {}
   json(response, status, {
     error: { message, type: status >= 500 ? 'server_error' : 'invalid_request_error', code }
   }, headers);
+}
+
+function errorCode(error) {
+  if (typeof error?.code === 'string' && /^[a-z0-9_]+$/.test(error.code)) return error.code;
+  if (error?.name === 'AbortError' || error?.message === 'Request aborted.') return 'request_aborted';
+  if (/timeout/i.test(String(error?.message || ''))) return 'hyperagent_timeout';
+  return 'hyperagent_bridge_error';
 }
 
 function authorized(request, config) {
@@ -125,6 +132,8 @@ export class BridgeServer {
   }
 
   async handleResponses(request, response) {
+    const requestId = `hacb_${randomUUID().replace(/-/g, '')}`;
+    const startedAt = Date.now();
     const body = await readJson(request);
     if (!body.model) throw Object.assign(new Error('The model field is required.'), { status: 400 });
     const agents = await this.getAgents();
@@ -152,10 +161,26 @@ export class BridgeServer {
     let threadId;
     let keepalive;
     const streaming = body.stream !== false;
-    await this.auditWriter({ event: 'request', model: body.model, agentId: agent.id, agentName: agent.name, streaming, promptChars: prompt.length, toolCount: tools.length, dailyUsed: budget.used, dailyLimit: budget.limit });
+    await this.auditWriter({
+      event: 'request',
+      requestId,
+      version: VERSION,
+      transport: 'oauth_mcp_threads',
+      model: body.model,
+      agentId: agent.id,
+      agentName: agent.name,
+      streaming,
+      requestChars: JSON.stringify(body).length,
+      promptChars: prompt.length,
+      toolCount: tools.length,
+      dailyUsed: budget.used,
+      dailyLimit: budget.limit,
+      costMeasurement: 'unavailable_from_supported_mcp'
+    });
     try {
+      const createStartedAt = Date.now();
       threadId = await client.createThread(agent.id, prompt);
-      await this.auditWriter({ event: 'thread_created', model: body.model, agentId: agent.id, threadId });
+      await this.auditWriter({ event: 'thread_created', requestId, model: body.model, agentId: agent.id, threadId, createThreadMs: Date.now() - createStartedAt });
       if (streaming) {
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
@@ -163,6 +188,7 @@ export class BridgeServer {
           connection: 'keep-alive',
           'x-accel-buffering': 'no',
           'x-hyperagent-thread-id': threadId,
+          'x-hacb-request-id': requestId,
           'x-content-type-options': 'nosniff'
         });
         response.flushHeaders?.();
@@ -180,19 +206,42 @@ export class BridgeServer {
         keepalive.unref?.();
       }
 
+      const waitStartedAt = Date.now();
       const result = await client.waitForThread(threadId, { signal: abort.signal });
-      const output = parseRelayOutput(result.text, tools);
-      await this.auditWriter({ event: 'completed', model: body.model, agentId: agent.id, threadId, outputType: output.type });
+      const waitForThreadMs = Date.now() - waitStartedAt;
+      const parseStartedAt = Date.now();
+      const output = parseRelayOutput(result.text, tools, { strict: this.config.strictRelayProtocol !== false });
+      await this.auditWriter({
+        event: 'completed',
+        requestId,
+        model: body.model,
+        agentId: agent.id,
+        threadId,
+        outputType: output.type,
+        waitForThreadMs,
+        parseMs: Date.now() - parseStartedAt,
+        totalMs: Date.now() - startedAt
+      });
       if (streaming) {
         for (const event of sseEvents(output, ids, { model: body.model, threadId }).slice(1)) writeSse(response, event);
         response.end();
       } else {
         json(response, 200, nonStreamingResponse(output, ids, { model: body.model, threadId }), {
-          'x-hyperagent-thread-id': threadId
+          'x-hyperagent-thread-id': threadId,
+          'x-hacb-request-id': requestId
         });
       }
     } catch (error) {
-      await this.auditWriter({ event: 'failed', model: body.model, agentId: agent.id, threadId: threadId || null, error: error.message });
+      const code = errorCode(error);
+      await this.auditWriter({
+        event: 'failed',
+        requestId,
+        model: body.model,
+        agentId: agent.id,
+        threadId: threadId || null,
+        errorCode: code,
+        totalMs: Date.now() - startedAt
+      });
       if (streaming && response.headersSent) {
         writeSse(response, {
           type: 'response.failed',
@@ -201,12 +250,13 @@ export class BridgeServer {
             status: 'failed',
             model: body.model,
             output: [],
-            error: { message: error.message, type: 'server_error', code: 'hyperagent_bridge_error' },
+            error: { message: error.message, type: 'server_error', code },
             metadata: { hyperagent_thread_id: threadId || null }
           }
         });
         response.end();
       } else {
+        error.code = code;
         throw error;
       }
     } finally {
@@ -246,7 +296,7 @@ export class BridgeServer {
           response.end();
           return;
         }
-        apiError(response, error.status || 500, error.message || String(error));
+        apiError(response, error.status || 500, error.message || String(error), errorCode(error));
       });
     });
     await new Promise((resolve, reject) => {

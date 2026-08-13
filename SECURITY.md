@@ -19,11 +19,15 @@ The project is designed around these constraints:
 
 - only Hyperagent's documented OAuth MCP endpoint is used;
 - OAuth uses authorization code + PKCE and issuer/origin binding;
+- OAuth scopes are limited to `threads:read`, `threads:write`, and `offline_access`;
 - the Responses endpoint binds to loopback only;
 - each machine receives a random local bearer token;
 - OAuth and local bearer tokens stay outside the repository;
 - App Mode backs up Codex configuration before changing defaults;
-- routing audits never record prompt or answer content.
+- routing audits never record prompt or answer content;
+- strict relay validation fails closed on invalid JSON, unknown tools, and schema-invalid arguments;
+- failed public receipts store redacted error codes rather than raw relay output;
+- `scripts/verify-release.mjs` rejects private state, common secret patterns, and undocumented Hyperagent API routes before packaging.
 
 Never commit or share:
 

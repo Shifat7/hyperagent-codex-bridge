@@ -46,11 +46,16 @@ export function resolveAgent(model, agents, config) {
     slugify(agent.name) === tail
   );
   if (byName) return byName;
-  if (config.defaultAgentId) {
-    const fallback = agents.find(agent => agent.id === config.defaultAgentId);
-    if (fallback) return fallback;
-  }
   throw new Error(`Unknown Hyperagent model '${requested}'. Run hacb models and choose one of the listed model IDs.`);
+}
+
+export class RelayProtocolError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'RelayProtocolError';
+    this.code = code;
+    this.status = 502;
+  }
 }
 
 export function modelInfo(item) {
@@ -314,43 +319,125 @@ function parseJsonCandidate(text) {
   try {
     return JSON.parse(unfenced);
   } catch {
-    const start = unfenced.indexOf('{');
-    const end = unfenced.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(unfenced.slice(start, end + 1));
-      } catch {
-        return null;
+    let start = -1;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = 0; index < unfenced.length; index += 1) {
+      const char = unfenced[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') {
+        quoted = true;
+        continue;
+      }
+      if (char === '{') {
+        if (depth === 0) start = index;
+        depth += 1;
+      } else if (char === '}' && depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          try {
+            return JSON.parse(unfenced.slice(start, index + 1));
+          } catch {
+            start = -1;
+          }
+        }
       }
     }
     return null;
   }
 }
 
-export function parseRelayOutput(text, tools = []) {
+function typeMatches(value, type) {
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (type === 'integer') return Number.isInteger(value);
+  if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
+  if (type === 'null') return value === null;
+  return typeof value === type;
+}
+
+function validateSchema(value, schema, path = '$') {
+  if (!schema || typeof schema !== 'object') return null;
+  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+  if (types.length && !types.some(type => typeMatches(value, type))) {
+    return `${path} must be ${types.join(' or ')}`;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some(item => Object.is(item, value))) {
+    return `${path} must be one of the declared enum values`;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const required of schema.required || []) {
+      if (!(required in value)) return `${path}.${required} is required`;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (schema.properties?.[key]) {
+        const error = validateSchema(child, schema.properties[key], `${path}.${key}`);
+        if (error) return error;
+      } else if (schema.additionalProperties === false) {
+        return `${path}.${key} is not allowed`;
+      }
+    }
+  }
+  if (Array.isArray(value) && schema.items) {
+    for (let index = 0; index < value.length; index += 1) {
+      const error = validateSchema(value[index], schema.items, `${path}[${index}]`);
+      if (error) return error;
+    }
+  }
+  return null;
+}
+
+function relayError(code, message, strict) {
+  if (strict) throw new RelayProtocolError(code, message);
+  return { type: 'final', text: `Hyperagent relay protocol error (${code}).` };
+}
+
+export function parseRelayOutput(text, tools = [], { strict = true } = {}) {
   const parsed = parseJsonCandidate(text);
-  if (!parsed || typeof parsed !== 'object') return { type: 'final', text: String(text || '') };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return relayError('relay_invalid_json', 'Hyperagent relay returned no valid JSON action.', strict);
+  }
   if (parsed.type === 'function_call') {
     const tool = tools.find(item => item?.type === 'function' && item.name === parsed.name);
-    if (!tool) return { type: 'final', text: `Hyperagent requested unavailable function tool '${parsed.name}'.\n\n${text}` };
+    if (!tool) return relayError('relay_unknown_tool', 'Hyperagent relay requested an unavailable function tool.', strict);
+    let args = parsed.arguments;
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args); } catch { return relayError('relay_invalid_arguments', 'Hyperagent relay returned invalid JSON tool arguments.', strict); }
+    }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) {
+      return relayError('relay_invalid_arguments', 'Hyperagent relay tool arguments must be an object.', strict);
+    }
+    const validationError = validateSchema(args, tool.parameters || { type: 'object' });
+    if (validationError) return relayError('relay_arguments_schema_mismatch', `Hyperagent relay tool arguments failed validation: ${validationError}.`, strict);
     return {
       type: 'function_call',
       name: parsed.name,
-      arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments || {})
+      arguments: JSON.stringify(args)
     };
   }
   if (parsed.type === 'custom_tool_call') {
     const tool = tools.find(item => item?.type === 'custom' && item.name === parsed.name);
-    if (!tool) return { type: 'final', text: `Hyperagent requested unavailable custom tool '${parsed.name}'.\n\n${text}` };
-    return { type: 'custom_tool_call', name: parsed.name, input: String(parsed.input || '') };
+    if (!tool) return relayError('relay_unknown_tool', 'Hyperagent relay requested an unavailable custom tool.', strict);
+    if (typeof parsed.input !== 'string') return relayError('relay_invalid_custom_input', 'Hyperagent relay custom-tool input must be a string.', strict);
+    return { type: 'custom_tool_call', name: parsed.name, input: parsed.input };
   }
   if (parsed.type === 'tool_search_call' || parsed.type === 'tool_search') {
     const tool = tools.find(item => item?.type === 'tool_search');
-    if (!tool) return { type: 'final', text: `Hyperagent requested unavailable tool_search.\n\n${text}` };
-    return { type: 'tool_search_call', arguments: parsed.arguments || { query: String(parsed.query || '') } };
+    if (!tool) return relayError('relay_unknown_tool', 'Hyperagent relay requested unavailable tool search.', strict);
+    const argumentsValue = parsed.arguments || { query: String(parsed.query || '') };
+    if (!argumentsValue || typeof argumentsValue !== 'object' || Array.isArray(argumentsValue) || typeof argumentsValue.query !== 'string' || !argumentsValue.query.trim()) {
+      return relayError('relay_invalid_tool_search', 'Hyperagent relay tool-search arguments require a non-empty query.', strict);
+    }
+    return { type: 'tool_search_call', arguments: argumentsValue };
   }
   if (parsed.type === 'final' && typeof parsed.text === 'string') return parsed;
-  return { type: 'final', text: typeof parsed.text === 'string' ? parsed.text : String(text || '') };
+  return relayError('relay_unknown_action', 'Hyperagent relay returned an unsupported action shape.', strict);
 }
 
 export function responseIds() {

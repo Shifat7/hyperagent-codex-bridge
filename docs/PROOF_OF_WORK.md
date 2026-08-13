@@ -1,5 +1,7 @@
 # Proof of work
 
+> Current v0.5.0 candidate evidence is in `V0.5.0_PROOF.md`. This document preserves the original v0.4.0 live route and v0.4.1 remediation history for auditability.
+
 ## Claim
 
 Hyperagent Codex Bridge lets Codex CLI and Codex App use named Hyperagent agents as model backends. Hyperagent handles reasoning and credit accounting. Codex retains the local filesystem, shell, patches, tests, sandbox, and approval system.

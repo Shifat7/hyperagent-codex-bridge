@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 — 2026-07-21
+
+- Add a one-command, zero-credit demo through the real Codex local-tool harness.
+- Add an explicit-confirmation live demo that verifies `function_call -> final` receipts.
+- Fail closed on invalid relay JSON, invented tools, schema-invalid arguments, and unsupported actions.
+- Add request correlation, latency metrics, redacted error codes, and publishable receipts.
+- Remove silent model fallback and default new installs to pinned aliases only.
+- Expand doctor checks across security, OAuth, routes, budget, bridge, and Codex profile.
+- Add Node 20/22 Linux, macOS, and Windows CI plus real Codex 0.144.6 tests.
+- Add release security verification and deterministic ZIP/checksum generation.
+- Expand the suite to 27 tests, all passing with the real Codex binary enabled.
+
 ## 0.4.1 — 2026-07-20
 
 Emergency cost-control and Codex App tool-compatibility patch.

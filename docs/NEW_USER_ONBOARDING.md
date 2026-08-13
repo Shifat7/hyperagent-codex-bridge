@@ -163,7 +163,7 @@ hacb profile
 App still showing OpenAI model:
 
 1. Run `hacb app-status`.
-2. Confirm version is 0.4.1 or newer.
+2. Confirm version is 0.5.0 or newer and run `hacb demo` before a paid route.
 3. Fully quit the app.
 4. Reopen and start a new chat.
 

@@ -154,3 +154,25 @@ test('non-streaming Responses endpoint returns a standard response object', asyn
     assert.equal(data.metadata.hyperagent_thread_id, 'thread_test_123');
   });
 });
+
+test('malformed relay output fails closed with a deterministic redacted receipt', async () => {
+  await withBridge('I cannot access your files.', async (base, harness) => {
+    const response = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hyperagent/sol-coder',
+        input: 'inspect',
+        tools: [{ type: 'function', name: 'shell', parameters: { type: 'object' } }],
+        stream: true
+      })
+    });
+    const text = await response.text();
+    assert.match(text, /event: response\.failed/);
+    assert.match(text, /relay_invalid_json/);
+    assert.equal(harness.audits.at(-1).event, 'failed');
+    assert.equal(harness.audits.at(-1).errorCode, 'relay_invalid_json');
+    assert.equal('error' in harness.audits.at(-1), false);
+    assert.doesNotMatch(JSON.stringify(harness.audits), /I cannot access/);
+  });
+});

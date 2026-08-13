@@ -145,7 +145,7 @@ The bridge response also carries a Hyperagent thread ID. You can find the corres
 
 ## 8. Use it in the Codex Mac app
 
-Do not enable App Mode on v0.4.0. Require v0.4.1+, `hacb budget` with remaining capacity, and a relay agent configured for low effort with a hard per-run USD cap.
+Do not enable App Mode on v0.4.0. Require v0.5.0+, `hacb budget` with remaining capacity, and a relay agent configured for low effort with a hard per-run USD cap. Run `hacb demo` before spending credits.
 
 The app does not currently expose CLI profiles in its normal provider picker. Enable the bridge as the main-config default for new app chats:
 

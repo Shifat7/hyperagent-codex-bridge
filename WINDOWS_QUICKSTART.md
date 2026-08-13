@@ -53,7 +53,7 @@ Confirm the startup header reports provider `hyperagent_credits`.
 
 ## 5. Codex App
 
-Do not enable App Mode on v0.4.0. Require v0.4.1+, remaining `hacb budget`, and a relay agent configured for low effort with a hard per-run USD cap.
+Do not enable App Mode on v0.4.0. Require v0.5.0+, remaining `hacb budget`, and a relay agent configured for low effort with a hard per-run USD cap. Run `hacb demo` before spending credits.
 
 Fully exit the Codex App, then run:
 

@@ -7,6 +7,7 @@
 | First setup | `hacb setup` |
 | Verify installation | `hacb doctor` |
 | List relay models | `hacb models` |
+| Discover all candidate agents | `hacb models --all` |
 | Start bridge | `hacb start` |
 | Stop bridge | `hacb stop` |
 | Foreground debugging | `hacb serve` |
@@ -19,6 +20,9 @@
 | Restore normal app defaults | `hacb app-off` |
 | Check App Mode | `hacb app-status` |
 | Show routing receipts | `hacb audit [count]` |
+| Publishable latency receipt | `hacb receipt [count]` |
+| No-credit real-Codex proof | `hacb demo` |
+| Controlled paid route proof | `hacb demo --live --confirm-spend` |
 | Remove generated CLI profile | `hacb uninstall-profile` |
 
 ## Private state
