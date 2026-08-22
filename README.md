@@ -232,6 +232,29 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Smart tool shortlisting
+
+Every turn is classified locally (`final_answer_only`, `read_or_search`, `edit_code`, `run_command`, `debug_failure`, `unknown`) and only the tool categories that task type needs are forwarded to Hyperagent. Tool schemas are minimised to argument names, types, and required lists; descriptions are capped at 160 characters. Exact tool names are never invented or renamed, conversations that already used tools keep them, and unknown turns keep the full inventory.
+
+```json
+{
+  "enableSmartToolSelection": true,
+  "forwardFullToolSchemas": false,
+  "maxToolDescriptionChars": 160
+}
+```
+
+Set `"enableSmartToolSelection": false` (and optionally `"forwardFullToolSchemas": true`) to restore unconditional forwarding.
+
+Measured locally with a synthetic 32-tool Codex toolbox and the request "Run the test suite.":
+
+```text
+Before: 32 tools forwarded, 10,431 tool-schema chars
+After:   4 tools forwarded,  1,127 tool-schema chars
+```
+
+Risks: a mis-classified first turn can omit a specialised MCP tool for that turn; the relay then returns plain text naming the missing tool instead of executing it, and you can disable the feature or rephrase the request.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.
