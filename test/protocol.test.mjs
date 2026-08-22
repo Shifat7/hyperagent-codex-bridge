@@ -5,7 +5,9 @@ import {
   buildRelayPrompt,
   extractClientTools,
   modelInfo,
+  normalizeInput,
   parseRelayOutput,
+  reduceToolOutput,
   resolveAgent,
   slugify,
   sseEvents
@@ -146,4 +148,57 @@ test('Codex model metadata and SSE fixtures include required fields', () => {
   );
   assert.equal(searchEvents[1].item.type, 'tool_search_call');
   assert.equal(searchEvents[1].item.execution, 'client');
+});
+
+test('tool result reducer strips ANSI noise and keeps the tail of successful output', () => {
+  const lines = [];
+  for (let i = 1; i <= 200; i += 1) lines.push(`step ${i} completed`);
+  lines.push('All tests passed. Exit code: 0');
+  const noisy = '\x1B[32m\x1B[1m$ npm test\x1B[0m\r\n' + lines.join('\n');
+  const reduced = reduceToolOutput(noisy, { enableToolResultReducer: true });
+  assert.doesNotMatch(reduced, /\x1B\[|npm test/);
+  assert.match(reduced, /Exit code: 0/);
+  assert.doesNotMatch(reduced, /step 10 completed\nstep 11 completed\nstep 12 completed/);
+  assert.match(reduced, /step 199 completed/);
+  assert.match(reduced, /\[tool output reduced by Hyperagent Codex Bridge: \d+ lines -> \d+\]/);
+});
+
+test('tool result reducer preserves error blocks and assertion diffs in failures', () => {
+  const lines = ['$ npm test'];
+  for (let i = 1; i <= 150; i += 1) lines.push(`passing suite ${i}`);
+  lines.push('FAIL src/auth.test.js', 'AssertionError: expected 4 to be 2', '  at parse (src/auth.js:42:11)', 'Exit code: 1');
+  const reduced = reduceToolOutput(lines.join('\n'), { enableToolResultReducer: true });
+  assert.match(reduced, /AssertionError: expected 4 to be 2/);
+  assert.match(reduced, /src\/auth\.js:42:11/);
+  assert.match(reduced, /auth\.test\.js/);
+  assert.match(reduced, /Exit code: 1/);
+  assert.ok(reduced.length < lines.join('\n').length);
+});
+
+test('search output is capped per file with an explicit remainder note', () => {
+  const lines = [];
+  for (let i = 1; i <= 9; i += 1) lines.push(`src/a.ts:${i}: export const thing${i} = ${i}`);
+  for (let i = 1; i <= 2; i += 1) lines.push(`src/b.ts:${i}: import { thing${i} } from './a'`);
+  const reduced = reduceToolOutput(lines.join('\n'), { enableToolResultReducer: true });
+  assert.equal((reduced.match(/src\/a\.ts:/g) || []).length, 5);
+  assert.equal((reduced.match(/src\/b\.ts:/g) || []).length, 2);
+  assert.match(reduced, /\+4 more matches in src\/a\.ts/);
+});
+
+test('reducer applies only to typed tool outputs and can be disabled', () => {
+  const longToolOutput = Array.from({ length: 60 }, (_, i) => `line-${i + 1}`).join('\n');
+  const config = { enableToolResultReducer: true, maxTurnChars: 12000 };
+  const turns = normalizeInput([
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: longToolOutput }] },
+    { type: 'function_call_output', call_id: 'call_1', output: longToolOutput }
+  ], config);
+  assert.match(turns[0].text, /^line-1\nline-2/);
+  assert.match(turns[1].text, /\[tool output reduced by Hyperagent Codex Bridge/);
+
+  const untouched = normalizeInput(
+    [{ type: 'function_call_output', call_id: 'call_1', output: longToolOutput }],
+    { enableToolResultReducer: false }
+  );
+  assert.match(untouched[0].text, /line-60/);
+  assert.doesNotMatch(untouched[0].text, /reduced by Hyperagent/);
 });

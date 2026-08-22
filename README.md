@@ -232,6 +232,26 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Tool result reducer
+
+Tool outputs sent back to Hyperagent are compressed before they enter the conversation: ANSI codes and progress-bar noise are stripped, successful command output keeps its last 20 meaningful lines, failed runs keep the first error block (assertion diffs, file paths with line/column) plus the last 80 lines, and grep-style output is capped at 5 matches per file with an explicit remainder note. Reduced outputs carry a `[tool output reduced by Hyperagent Codex Bridge: N lines -> M]` marker. User prose and assistant turns are never reduced.
+
+```json
+{
+  "enableToolResultReducer": true,
+  "maxSuccessfulCommandLines": 20,
+  "maxFailedCommandLines": 80,
+  "maxSearchMatchesPerFile": 5
+}
+```
+
+Measured locally on a synthetic 184-line failing `npm test` log:
+
+```text
+Before: 6,339 chars (184 lines)
+After:    204 chars (6 lines) — error block and assertion diff retained
+```
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.
