@@ -458,7 +458,7 @@ export class BridgeServer {
       }
 
       const result = await client.waitForThread(threadId, { signal: abort.signal });
-      const output = parseRelayOutput(result.text, tools);
+      const output = parseRelayOutput(result.text, tools, this.config);
       const completed = { output, ids, model: body.model, threadId, requestId: serverRequestId, streaming };
       await this.safeAudit({
         event: 'completed',

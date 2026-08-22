@@ -337,6 +337,19 @@ Config:
 
 The pattern: Codex updates checkpoint files locally, the bridge injects them compactly, and old chat turns can then be dropped without losing durable context.
 
+### Multi-tool-call support (experimental, off by default)
+
+When enabled, the relay may request up to `maxToolCallsPerResponse` independent client tool calls in one JSON response; the bridge converts them into multiple Responses `function_call` output items so Codex executes them in one turn instead of one full Hyperagent round-trip per call.
+
+```json
+{
+  "enableMultiToolCalls": true,
+  "maxToolCallsPerResponse": 3
+}
+```
+
+Fails safely: any unavailable tool name, or more than the maximum calls, degrades to a plain final answer naming the problem — never a partial execution. Disabled by default until proven stable across Codex builds.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

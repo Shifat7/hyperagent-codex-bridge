@@ -120,8 +120,9 @@ export const DEFAULT_CONFIG = Object.freeze({
     'TEST_LOG.md',
     'DECISIONS.md'
   ],
-  maxCheckpointChars: 4000
-});
+  maxCheckpointChars: 4000,
+  enableMultiToolCalls: false,
+  maxToolCallsPerResponse: 3});
 
 export async function ensureStateDir() {
   await mkdir(stateDir(), { recursive: true, mode: 0o700 });

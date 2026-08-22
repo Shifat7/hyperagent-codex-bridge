@@ -746,3 +746,30 @@ test('disconnect while awaiting an idempotency claim cannot reserve or dispatch'
     await bridge.close();
   }
 });
+
+test('enabled multi-tool responses stream one Responses item per call', async () => {
+  const harness = createHarness('{"type":"function_calls","calls":[{"name":"shell","arguments":{"command":"pwd"}},{"name":"shell","arguments":{"command":"ls"}}]}');
+  harness.bridge.config.enableMultiToolCalls = true;
+  await harness.bridge.start();
+  try {
+    const base = `http://127.0.0.1:${harness.bridge.server.address().port}`;
+    const response = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hyperagent/sol-coder',
+        input: 'run two commands',
+        tools: [{ type: 'function', name: 'shell', parameters: { type: 'object' } }],
+        stream: true
+      })
+    });
+    const text = await response.text();
+    const doneItems = text.split('\n').filter(line => line.startsWith('data:') && line.includes('"type":"function_call"'));
+    assert.equal(doneItems.length, 2);
+    assert.match(text, /"call_id":"call_[a-f0-9]+_0"/);
+    assert.match(text, /"call_id":"call_[a-f0-9]+_1"/);
+    assert.match(text, /\\"command\\":\\"ls\\"/);
+  } finally {
+    await harness.bridge.close();
+  }
+});
