@@ -17,6 +17,7 @@ import {
   VERSION
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
+import { loadCheckpoint } from './checkpoint.mjs';
 import {
   buildAgentModels,
   buildRelayPromptWithMetrics,
@@ -180,7 +181,7 @@ function etagFor(value) {
 }
 
 export class BridgeServer {
-  constructor(config, { clientFactory, auditWriter, logWriter, excerptWriter, budgetGuard, budgetManager, idempotencyManager } = {}) {
+  constructor(config, { clientFactory, auditWriter, logWriter, excerptWriter, checkpointLoader, budgetGuard, budgetManager, idempotencyManager } = {}) {
     this.config = config;
     this.server = null;
     this.agentCache = { at: 0, agents: [] };
@@ -190,6 +191,9 @@ export class BridgeServer {
     this.excerptWriter = config.debugPromptExcerpts
       ? (excerptWriter || appendPromptExcerpt)
       : null;
+    this.checkpointLoader = config.enableCheckpointMemory === false
+      ? null
+      : (checkpointLoader || loadCheckpoint);
     this.budgetManager = budgetManager || (budgetGuard
       ? {
           reserve: async configValue => ({ id: null, ...await budgetGuard(configValue) }),
@@ -355,7 +359,8 @@ export class BridgeServer {
     const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
     try {
       tools = extractClientTools(body, this.config);
-      ({ prompt, breakdown, excerpts } = buildRelayPromptWithMetrics(body, agent, this.config, tools));
+      const checkpoint = this.checkpointLoader ? await this.checkpointLoader(this.config) : null;
+      ({ prompt, breakdown, excerpts } = buildRelayPromptWithMetrics(body, agent, this.config, tools, checkpoint?.text || null));
     } catch (error) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
       throw error;

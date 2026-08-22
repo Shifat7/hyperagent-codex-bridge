@@ -244,7 +244,6 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
-<<<<<<< HEAD
 ### Smart tool shortlisting
 
 Every turn is classified locally (`final_answer_only`, `read_or_search`, `edit_code`, `run_command`, `debug_failure`, `unknown`) and only the tool categories that task type needs are forwarded to Hyperagent. Tool schemas are minimised to argument names, types, and required lists; descriptions are capped at 160 characters. Exact tool names are never invented or renamed, conversations that already used tools keep them, and unknown turns keep the full inventory.
@@ -268,6 +267,7 @@ After:   4 tools forwarded,  1,127 tool-schema chars
 
 Risks: a mis-classified first turn can omit a specialised MCP tool for that turn; the relay then returns plain text naming the missing tool instead of executing it, and you can disable the feature or rephrase the request.
 
+
 ### Relay prompt minimisation
 
 The bridge's per-request relay prompt is now short and mechanical; static behaviour lives in your Hyperagent relay agent's system prompt (see [`RELAY_AGENT_PROMPT.md`](RELAY_AGENT_PROMPT.md)). The bridge keeps only what survives imperfect agent setup: the forwarded tool list, the four JSON shapes, and the never-invent-names / one-JSON-object rules.
@@ -281,7 +281,6 @@ After:  1,370 prompt chars (-31%)
 
 The saving applies to every sampling request of every tool loop. Recommended relay-agent setup is unchanged: use `RELAY_AGENT_PROMPT.md` as the system prompt, disable the agent's own Hyperagent tools, pin its model, and keep reasoning effort low.
 
-=======
 ### Tool result reducer
 
 Tool outputs sent back to Hyperagent are compressed before they enter the conversation: ANSI codes and progress-bar noise are stripped, successful command output keeps its last 20 meaningful lines, failed runs keep the first error block (assertion diffs, file paths with line/column) plus the last 80 lines, and grep-style output is capped at 5 matches per file with an explicit remainder note. Reduced outputs carry a `[tool output reduced by Hyperagent Codex Bridge: N lines -> M]` marker. User prose and assistant turns are never reduced.
@@ -302,7 +301,42 @@ Before: 6,339 chars (184 lines)
 After:    204 chars (6 lines) — error block and assertion diff retained
 ```
 
->>>>>>> pr-03-tool-result-reducer
+
+### Durable checkpoint memory
+
+Instead of re-sending long chat history every turn, the bridge injects a bounded local checkpoint (4,000 chars default) from `.hacb/` in your project directory before recent conversation turns. Missing files are ignored; path traversal in configured names is rejected; `"enableCheckpointMemory": false` disables it entirely. `.hacb/` is gitignored by default.
+
+Let Codex maintain these files through its normal file tools — no Hyperagent calls are spent summarising:
+
+```md
+# Codex State
+
+## Current goal
+
+## Files touched
+
+## Decisions made
+
+## Tests run
+
+## Known issues
+
+## Next exact step
+```
+
+Config:
+
+```json
+{
+  "enableCheckpointMemory": true,
+  "checkpointDir": ".hacb",
+  "checkpointFiles": ["CODEX_STATE.md", "TASK_PLAN.md", "TEST_LOG.md", "DECISIONS.md"],
+  "maxCheckpointChars": 4000
+}
+```
+
+The pattern: Codex updates checkpoint files locally, the bridge injects them compactly, and old chat turns can then be dropped without losing durable context.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

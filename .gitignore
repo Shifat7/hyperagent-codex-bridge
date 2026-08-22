@@ -23,3 +23,6 @@ models.json
 *.zip
 *.tgz
 *.sha256
+
+# Local Hyperagent bridge checkpoints
+.hacb/

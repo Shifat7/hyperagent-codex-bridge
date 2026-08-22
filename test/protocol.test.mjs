@@ -371,3 +371,31 @@ test('reducer applies only to typed tool outputs and can be disabled', () => {
   assert.match(untouched[0].text, /line-60/);
   assert.doesNotMatch(untouched[0].text, /reduced by Hyperagent/);
 });
+
+test('relay prompt injects the checkpoint before the conversation', () => {
+  const prompt = buildRelayPrompt({
+    model: 'hyperagent/sol-coder',
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue the task' }] },
+      { type: 'function_call_output', call_id: 'call_1', output: 'old result' }
+    ],
+    tools: []
+  }, agents[0], { maxConversationTurns: 1 }, null, '# Codex State\nGoal: ship PRs');
+  assert.match(prompt, /Project checkpoint:\\n# Codex State\\nGoal: ship PRs/);
+  assert.ok(prompt.indexOf('"project_checkpoint"') >= 0 && prompt.indexOf('"project_checkpoint"') < prompt.indexOf('"conversation":'));
+});
+
+test('checkpoint survives while old conversation turns are dropped', () => {
+  const turns = [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'ancient first request' }] },
+    { type: 'function_call_output', call_id: 'call_1', output: 'ancient tool result' },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'middle request' }] },
+    { type: 'function_call_output', call_id: 'call_2', output: 'recent tool result' },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'latest request' }] }
+  ];
+  const prompt = buildRelayPrompt({ input: turns, tools: [] }, agents[0], { maxConversationTurns: 2 }, null, 'Goal: ship PRs');
+  assert.match(prompt, /Goal: ship PRs/);
+  assert.match(prompt, /latest request/);
+  assert.doesNotMatch(prompt, /ancient first request/);
+  assert.doesNotMatch(prompt, /ancient tool result/);
+});

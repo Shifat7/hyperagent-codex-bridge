@@ -510,7 +510,7 @@ export function extractClientTools(body, config = {}) {
   return shortlistTools(normalized, classifyTurn(body?.input), config);
 }
 
-function relayPromptSections(body, agent, config = {}, extractedTools = null) {
+function relayPromptSections(body, agent, config = {}, extractedTools = null, checkpoint = null) {
   const turns = normalizeInput(body.input, config);
   const tools = extractedTools || extractClientTools(body, config);
   const instructions = 'Act as the Codex reasoning backend. Use only the forwarded client tools and return one compact JSON action.';
@@ -528,6 +528,7 @@ function relayPromptSections(body, agent, config = {}, extractedTools = null) {
     selected_hyperagent_agent: agent.name,
     reasoning_effort: effort,
     developer_instructions: instructions,
+    ...(checkpoint ? { project_checkpoint: `Project checkpoint:\n${checkpoint}` } : {}),
     conversation: turns,
     client_tools: tools
   };
@@ -554,14 +555,14 @@ function relayPromptSections(body, agent, config = {}, extractedTools = null) {
   return { prompt, headerText, headerChars: headerText.length + 1, turns, tools, payloadJson };
 }
 
-export function buildRelayPrompt(body, agent, config = {}, extractedTools = null) {
-  return relayPromptSections(body, agent, config, extractedTools).prompt;
+export function buildRelayPrompt(body, agent, config = {}, extractedTools = null, checkpoint = null) {
+  return relayPromptSections(body, agent, config, extractedTools, checkpoint).prompt;
 }
 
 const TOOL_RESULT_ROLES = new Set(['tool_result', 'custom_tool_result', 'tool_search_result']);
 
-export function buildRelayPromptWithMetrics(body, agent, config = {}, extractedTools = null) {
-  const { prompt, headerText, headerChars, turns, tools, payloadJson } = relayPromptSections(body, agent, config, extractedTools);
+export function buildRelayPromptWithMetrics(body, agent, config = {}, extractedTools = null, checkpoint = null) {
+  const { prompt, headerText, headerChars, turns, tools, payloadJson } = relayPromptSections(body, agent, config, extractedTools, checkpoint);
   const conversationChars = turns.reduce((sum, turn) => sum + turn.text.length, 0);
   const toolResultChars = turns
     .filter(turn => TOOL_RESULT_ROLES.has(turn.role))
