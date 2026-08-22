@@ -317,6 +317,7 @@ test('schema minimisation keeps names and argument shapes but trims descriptions
   }), { enableSmartToolSelection: true, forwardFullToolSchemas: true, maxForwardedTools: 32 });
   assert.equal(full[0].description.length, 400);
   assert.equal(full[0].parameters.properties.command.description, 'full');
+});
 
 test('tool result reducer strips ANSI noise and keeps the tail of successful output', () => {
   const lines = [];
