@@ -391,6 +391,20 @@ When the cap is hit, the bridge fails closed — Codex sees `This local Hyperage
 
 A warning is recorded in the audit log when cumulative prompt chars cross `warnAtPromptCharsPerTask`.
 
+### Request fingerprint cache
+
+Codex retries identical requests after local hiccups without an `Idempotency-Key`; each retry previously created another Hyperagent thread and burned credits. The optional fingerprint cache stores completed successful responses by `sha256(canonical JSON body)` in the private state directory and replays them locally (header `X-Response-Cache-Replayed: true`) until the TTL expires.
+
+```json
+{
+  "enableResponseCache": true,
+  "responseCacheTtlMs": 1800000,
+  "responseCacheMaxEntries": 128
+}
+```
+
+Off by default because it changes replay semantics for un-keyed requests. Only completed successes are cached — never errors, cancellations, or in-progress outcomes — and an explicit `Idempotency-Key` always wins over the cache.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

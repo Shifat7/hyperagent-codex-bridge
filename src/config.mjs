@@ -78,6 +78,14 @@ function taskLockPath() {
   return join(stateDir(), 'task.lock');
 }
 
+export function responseCachePath() {
+  return join(stateDir(), 'response-cache.json');
+}
+
+function responseCacheLockPath() {
+  return join(stateDir(), 'response-cache.lock');
+}
+
 export const DEFAULT_CONFIG = Object.freeze({
   configVersion: CONFIG_SCHEMA_VERSION,
   mcpUrl: DEFAULT_MCP_URL,
@@ -133,9 +141,14 @@ debugPromptExcerpts: false,
   maxToolCallsPerResponse: 3,
   enableAgentRouting: false,
   agentRoutes: {},
-maxRequestsPerTask: 8,
+  maxRequestsPerTask: 8,
   maxPromptCharsPerTask: 180000,
-  warnAtPromptCharsPerTask: 120000});
+  warnAtPromptCharsPerTask: 120000,
+  enableResponseCache: false,
+  responseCacheTtlMs: 30 * 60 * 1000,
+  responseCacheMaxEntries: 128
+});
+
 export async function ensureStateDir() {
   await mkdir(stateDir(), { recursive: true, mode: 0o700 });
   await chmod(stateDir(), 0o700).catch(() => {});
@@ -713,4 +726,63 @@ export function reserveTaskRequest({ promptChars = 0 } = {}) {
   }));
   taskQueue = run.catch(() => {});
   return run;
+}
+
+let responseCacheQueue = Promise.resolve();
+
+function withResponseCacheLock(callback) {
+  return withFileLock(responseCacheLockPath(), 'response_cache', callback);
+}
+
+function normalizeResponseCache(current) {
+  return {
+    version: 1,
+    entries: current?.entries && typeof current.entries === 'object' && !Array.isArray(current.entries)
+      ? current.entries
+      : {}
+  };
+}
+
+function responseCacheOptions(config = {}) {
+  return {
+    ttlMs: Math.max(1000, Number(config.responseCacheTtlMs) || DEFAULT_CONFIG.responseCacheTtlMs),
+    maxEntries: Math.max(1, Math.min(10_000, Number(config.responseCacheMaxEntries) || DEFAULT_CONFIG.responseCacheMaxEntries))
+  };
+}
+
+function pruneResponseCache(state, { ttlMs, now }) {
+  for (const [key, entry] of Object.entries(state.entries)) {
+    const at = Number(entry?.completedAt) || 0;
+    if (!at || now - at > ttlMs) delete state.entries[key];
+  }
+}
+
+export function lookupResponseCache(fingerprint, config = {}) {
+  const run = responseCacheQueue.then(() => withResponseCacheLock(async () => {
+    const { ttlMs, now } = { ...responseCacheOptions(config), now: Date.now() };
+    const state = normalizeResponseCache(await readJson(responseCachePath(), { version: 1, entries: {} }));
+    pruneResponseCache(state, { ttlMs, now });
+    const entry = state.entries[fingerprint];
+    await atomicWriteJson(responseCachePath(), state, 0o600);
+    return entry ? structuredClone(entry) : null;
+  }));
+  responseCacheQueue = run.catch(() => null);
+  return run;
+}
+
+export function storeResponseCache(fingerprint, result, config = {}, { completedAt = Date.now() } = {}) {
+  const run = responseCacheQueue.then(() => withResponseCacheLock(async () => {
+    const options = responseCacheOptions(config);
+    const state = normalizeResponseCache(await readJson(responseCachePath(), { version: 1, entries: {} }));
+    pruneResponseCache(state, { ttlMs: options.ttlMs, now: Date.now() });
+    state.entries[fingerprint] = { result: structuredClone(result), completedAt };
+    const entries = Object.entries(state.entries).sort((a, b) => (Number(a[1]?.completedAt) || 0) - (Number(b[1]?.completedAt) || 0));
+    while (entries.length > options.maxEntries) {
+      const [oldest] = entries.shift();
+      delete state.entries[oldest];
+    }
+    await atomicWriteJson(responseCachePath(), state, 0o600);
+    return Object.keys(state.entries).length;
+  }));
+  responseCacheQueue = run.catch(() => {});  return run;
 }
