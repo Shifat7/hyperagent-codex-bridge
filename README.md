@@ -232,6 +232,19 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Relay prompt minimisation
+
+The bridge's per-request relay prompt is now short and mechanical; static behaviour lives in your Hyperagent relay agent's system prompt (see [`RELAY_AGENT_PROMPT.md`](RELAY_AGENT_PROMPT.md)). The bridge keeps only what survives imperfect agent setup: the forwarded tool list, the four JSON shapes, and the never-invent-names / one-JSON-object rules.
+
+Measured locally on a trivial one-turn request with one tool:
+
+```text
+Before: 1,978 prompt chars
+After:  1,370 prompt chars (-31%)
+```
+
+The saving applies to every sampling request of every tool loop. Recommended relay-agent setup is unchanged: use `RELAY_AGENT_PROMPT.md` as the system prompt, disable the agent's own Hyperagent tools, pin its model, and keep reasoning effort low.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.
