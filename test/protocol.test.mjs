@@ -8,6 +8,7 @@ import {
   parseRelayOutput,
   resolveAgent,
   slugify,
+  nonStreamingResponse,
   sseEvents
 } from '../src/protocol.mjs';
 
@@ -146,4 +147,47 @@ test('Codex model metadata and SSE fixtures include required fields', () => {
   );
   assert.equal(searchEvents[1].item.type, 'tool_search_call');
   assert.equal(searchEvents[1].item.execution, 'client');
+});
+
+test('multi-tool calls parse, validate, and fail safely', () => {
+  const tools = [
+    { type: 'function', name: 'shell' },
+    { type: 'function', name: 'read_file' }
+  ];
+  const config = { enableMultiToolCalls: true, maxToolCallsPerResponse: 3 };
+  assert.deepEqual(
+    parseRelayOutput('{"type":"function_calls","calls":[{"name":"shell","arguments":{"command":"pwd"}},{"name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}]}', tools, config),
+    { type: 'function_calls', calls: [{ name: 'shell', arguments: '{"command":"pwd"}' }, { name: 'read_file', arguments: '{"path":"a.ts"}' }] }
+  );
+
+  assert.equal(parseRelayOutput('{"type":"function_calls","calls":[{"name":"shell"},{"name":"nonexistent_tool"}]}', tools, config).type, 'final');
+
+  assert.match(
+    parseRelayOutput('{"type":"function_calls","calls":[{"name":"shell"},{"name":"shell"},{"name":"shell"},{"name":"shell"}]}', tools, config).text,
+    /requested 4 tool calls.*maximum is 3/s
+  );
+});
+
+test('multi-tool calls stay inert unless explicitly enabled', () => {
+  const raw = '{"type":"function_calls","calls":[{"name":"shell","arguments":{}}]}';
+  const parsed = parseRelayOutput(raw, [{ type: 'function', name: 'shell' }], { enableMultiToolCalls: false });
+  assert.equal(parsed.type, 'final');
+  const legacy = parseRelayOutput(raw, [{ type: 'function', name: 'shell' }]);
+  assert.equal(legacy.type, 'final');
+});
+
+test('multi-tool outputs render as multiple Responses items with distinct call ids', () => {
+  const output = {
+    type: 'function_calls',
+    calls: [{ name: 'shell', arguments: '{"command":"pwd"}' }, { name: 'read_file', arguments: '{"path":"a"}' }]
+  };
+  const events = sseEvents(output, { responseId: 'resp_9', itemId: 'msg_9', callId: 'call_9' }, { model: 'hyperagent/sol-coder', threadId: 'thread_9' });
+  assert.deepEqual(events.map(event => event.type), ['response.created', 'response.output_item.done', 'response.output_item.done', 'response.completed']);
+  assert.deepEqual(events.map(event => event.item?.call_id).filter(Boolean), ['call_9_0', 'call_9_1']);
+  assert.equal(events[1].item.name, 'shell');
+  assert.equal(events[2].item.name, 'read_file');
+
+  const response = nonStreamingResponse(output, { responseId: 'resp_10', itemId: 'msg_10', callId: 'call_10' }, { model: 'hyperagent/sol-coder' });
+  assert.equal(response.output.length, 2);
+  assert.deepEqual(response.output.map(item => item.call_id), ['call_10_0', 'call_10_1']);
 });

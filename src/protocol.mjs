@@ -369,9 +369,24 @@ function parseJsonCandidate(text) {
   }
 }
 
-export function parseRelayOutput(text, tools = []) {
+export function parseRelayOutput(text, tools = [], config = {}) {
   const parsed = parseJsonCandidate(text);
   if (!parsed || typeof parsed !== 'object') return { type: 'final', text: String(text || '') };
+  if (parsed.type === 'function_calls' && Array.isArray(parsed.calls) && config.enableMultiToolCalls === true) {
+    const maxCalls = Math.max(1, Number(config.maxToolCallsPerResponse || 3));
+    if (parsed.calls.length > maxCalls) {
+      return { type: 'final', text: `Hyperagent requested ${parsed.calls.length} tool calls; the maximum is ${maxCalls}. Re-run with fewer calls.` };
+    }
+    const calls = [];
+    for (const call of parsed.calls) {
+      const tool = tools.find(item => item?.type === 'function' && item.name === call?.name);
+      if (!tool) {
+        return { type: 'final', text: `Hyperagent requested unavailable function tool '${call?.name}'.\n\n${text}` };
+      }
+      calls.push({ name: call.name, arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments || {}) });
+    }
+    return { type: 'function_calls', calls };
+  }
   if (parsed.type === 'function_call') {
     const tool = tools.find(item => item?.type === 'function' && item.name === parsed.name);
     if (!tool) return { type: 'final', text: `Hyperagent requested unavailable function tool '${parsed.name}'.\n\n${text}` };
@@ -412,7 +427,14 @@ export function sseEvents(output, ids, { model, threadId, requestId } = {}) {
   const metadata = responseMetadata(threadId, requestId);
   const response = { id: ids.responseId, status: 'in_progress', model, output: [], metadata };
   const events = [{ type: 'response.created', response }];
-  if (output.type === 'function_call') {
+  if (output.type === 'function_calls' && Array.isArray(output.calls)) {
+    output.calls.forEach((call, index) => {
+      events.push({
+        type: 'response.output_item.done',
+        item: { type: 'function_call', call_id: `${ids.callId}_${index}`, name: call.name, arguments: call.arguments }
+      });
+    });
+  } else if (output.type === 'function_call') {
     events.push({
       type: 'response.output_item.done',
       item: { type: 'function_call', call_id: ids.callId, name: output.name, arguments: output.arguments }
@@ -451,19 +473,26 @@ export function sseEvents(output, ids, { model, threadId, requestId } = {}) {
 }
 
 export function nonStreamingResponse(output, ids, { model, threadId, requestId } = {}) {
-  const item = output.type === 'function_call'
-    ? { type: 'function_call', call_id: ids.callId, name: output.name, arguments: output.arguments }
-    : output.type === 'custom_tool_call'
-      ? { type: 'custom_tool_call', call_id: ids.callId, name: output.name, input: output.input }
-      : output.type === 'tool_search_call'
-        ? { type: 'tool_search_call', call_id: ids.callId, status: 'completed', execution: 'client', arguments: output.arguments }
-        : { type: 'message', role: 'assistant', id: ids.itemId, content: [{ type: 'output_text', text: output.text || '' }] };
+  const items = output.type === 'function_calls' && Array.isArray(output.calls)
+    ? output.calls.map((call, index) => ({
+        type: 'function_call',
+        call_id: `${ids.callId}_${index}`,
+        name: call.name,
+        arguments: call.arguments
+      }))
+    : [output.type === 'function_call'
+        ? { type: 'function_call', call_id: ids.callId, name: output.name, arguments: output.arguments }
+        : output.type === 'custom_tool_call'
+          ? { type: 'custom_tool_call', call_id: ids.callId, name: output.name, input: output.input }
+          : output.type === 'tool_search_call'
+            ? { type: 'tool_search_call', call_id: ids.callId, status: 'completed', execution: 'client', arguments: output.arguments }
+            : { type: 'message', role: 'assistant', id: ids.itemId, content: [{ type: 'output_text', text: output.text || '' }] }];
   return {
     id: ids.responseId,
     object: 'response',
     status: 'completed',
     model,
-    output: [item],
+    output: items,
     metadata: responseMetadata(threadId, requestId)
   };
 }
