@@ -66,6 +66,14 @@ function idempotencyLockPath() {
   return join(stateDir(), 'idempotency.lock');
 }
 
+export function taskPath() {
+  return join(stateDir(), 'tasks.json');
+}
+
+function taskLockPath() {
+  return join(stateDir(), 'task.lock');
+}
+
 export const DEFAULT_CONFIG = Object.freeze({
   configVersion: CONFIG_SCHEMA_VERSION,
   mcpUrl: DEFAULT_MCP_URL,
@@ -99,7 +107,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxConversationTurns: 8,
   maxForwardedTools: 32,
   maxPromptChars: 70000,
-  blockMultiAgentTools: true
+  blockMultiAgentTools: true,
+  maxRequestsPerTask: 8,
+  maxPromptCharsPerTask: 180000,
+  warnAtPromptCharsPerTask: 120000
 });
 
 export async function ensureStateDir() {
@@ -560,5 +571,115 @@ export function reconcileIdempotency(config) {
     return Object.keys(state.records).length;
   }));
   idempotencyQueue = run.catch(() => {});
+  return run;
+}
+
+let taskQueue = Promise.resolve();
+
+function withTaskLock(callback) {
+  return withFileLock(taskLockPath(), 'task', callback);
+}
+
+function normalizeTasks(current) {
+  return {
+    version: 1,
+    active: current?.active && typeof current.active === 'object' ? current.active : null,
+    history: Array.isArray(current?.history) ? current.history.slice(-100) : []
+  };
+}
+
+function taskLimits(overrides = {}, config = {}) {
+  const limit = (value, fallback, minimum) => Math.max(minimum, Number.isSafeInteger(value) ? value : Math.max(minimum, Number(config[fallback]) || DEFAULT_CONFIG[fallback]));
+  return {
+    maxRequestsPerTask: limit(overrides.maxRequestsPerTask, 'maxRequestsPerTask', 1),
+    maxPromptCharsPerTask: limit(overrides.maxPromptCharsPerTask, 'maxPromptCharsPerTask', 1000),
+    warnAtPromptCharsPerTask: limit(overrides.warnAtPromptCharsPerTask, 'warnAtPromptCharsPerTask', 0)
+  };
+}
+
+export function startTask(name, overrides = {}) {
+  const cleanName = String(name || '').trim().slice(0, 80);
+  if (!cleanName) throw new Error('Usage: hacb task start <name>');
+  const limits = taskLimits(overrides);
+  const run = taskQueue.then(() => withTaskLock(async () => {
+    const current = normalizeTasks(await readJson(taskPath(), { version: 1, active: null, history: [] }));
+    if (current.active) await stopTask();
+    const task = {
+      name: cleanName,
+      startedAt: new Date().toISOString(),
+      requestCount: 0,
+      promptChars: 0,
+      toolLoops: 0,
+      limits
+    };
+    current.active = task;
+    current.history.push(cleanName);
+    await atomicWriteJson(taskPath(), current, 0o600);
+    return structuredClone(task);
+  }));
+  taskQueue = run.catch(() => {});
+  return run;
+}
+
+export async function getActiveTask() {
+  await ensureStateDir();
+  const current = normalizeTasks(await readJson(taskPath(), { version: 1, active: null, history: [] }));
+  return current.active;
+}
+
+export async function stopTask() {
+  const run = taskQueue.then(() => withTaskLock(async () => {
+    const current = normalizeTasks(await readJson(taskPath(), { version: 1, active: null, history: [] }));
+    const stopped = current.active;
+    current.active = null;
+    await atomicWriteJson(taskPath(), current, 0o600);
+    return stopped;
+  }));
+  taskQueue = run.catch(() => {});
+  return run;
+}
+
+export async function commitTaskToolLoop(config = {}) {
+  const run = taskQueue.then(() => withTaskLock(async () => {
+    const current = normalizeTasks(await readJson(taskPath(), { version: 1, active: null, history: [] }));
+    if (!current.active) return null;
+    current.active.toolLoops += 1;
+    await atomicWriteJson(taskPath(), current, 0o600);
+    return { toolLoops: current.active.toolLoops };
+  }));
+  taskQueue = run.catch(() => {});
+  return run;
+}
+
+export function reserveTaskRequest({ promptChars = 0 } = {}) {
+  const run = taskQueue.then(() => withTaskLock(async () => {
+    const current = normalizeTasks(await readJson(taskPath(), { version: 1, active: null, history: [] }));
+    if (!current.active) return { skipped: true, warned: false };
+    const task = current.active;
+    const { maxRequestsPerTask, maxPromptCharsPerTask, warnAtPromptCharsPerTask } = task.limits || taskLimits();
+    if (task.requestCount >= maxRequestsPerTask || task.promptChars + promptChars > maxPromptCharsPerTask) {
+      throw Object.assign(
+        new Error(`This local Hyperagent task budget is exhausted (${task.requestCount}/${maxRequestsPerTask} requests, ${task.promptChars + promptChars}/${maxPromptCharsPerTask} prompt chars). Start a new task or raise maxRequestsPerTask.`),
+        { status: 429, code: 'task_budget_exhausted' }
+      );
+    }
+    task.requestCount += 1;
+    task.promptChars += promptChars;
+    const warnedBefore = task.warnedAt || 0;
+    const warned = Boolean(warnAtPromptCharsPerTask) && !warnedBefore && task.promptChars >= warnAtPromptCharsPerTask;
+    if (warned) task.warnedAt = new Date().toISOString();
+    await atomicWriteJson(taskPath(), current, 0o600);
+    return {
+      skipped: false,
+      warned,
+      name: task.name,
+      requestCount: task.requestCount,
+      requestLimit: maxRequestsPerTask,
+      promptChars: task.promptChars,
+      promptCharLimit: maxPromptCharsPerTask,
+      toolLoops: task.toolLoops
+    };
+  }));
+  taskQueue = run.catch(() => {});
   return run;
 }

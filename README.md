@@ -232,6 +232,28 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Per-task budgets
+
+Daily caps bound a whole day; runaway agent loops happen per task. Start an explicit task before a coding session and every dispatched request counts against it:
+
+```bash
+hacb task start fix-auth-bug
+hacb task status
+hacb task stop
+```
+
+When the cap is hit, the bridge fails closed — Codex sees `This local Hyperagent task budget is exhausted. Start a new task or raise maxRequestsPerTask.` and no further Hyperagent threads are created for that task. Task budgets are durable across restarts, separate from (and never bypass) the daily budget, and requests without an active task are unaffected.
+
+```json
+{
+  "maxRequestsPerTask": 8,
+  "maxPromptCharsPerTask": 180000,
+  "warnAtPromptCharsPerTask": 120000
+}
+```
+
+A warning is recorded in the audit log when cumulative prompt chars cross `warnAtPromptCharsPerTask`.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

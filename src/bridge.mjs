@@ -5,6 +5,7 @@ import {
   appendGatewayLog,
   claimIdempotency,
   commitDailyRequestBudget,
+  commitTaskToolLoop,
   deleteIdempotency,
   getDailyBudgetStatus,
   markDailyRequestBudgetDispatching,
@@ -12,6 +13,7 @@ import {
   reconcileIdempotency,
   releaseDailyRequestBudget,
   reserveDailyRequestBudget,
+  reserveTaskRequest,
   updateIdempotency,
   VERSION
 } from './config.mjs';
@@ -33,6 +35,7 @@ const PUBLIC_ERRORS = Object.freeze({
   ambiguous_agent_slug: 'The reachable agent catalog cannot be selected safely.',
   ambiguous_model_alias: 'The configured model aliases cannot be selected safely.',
   budget_exhausted: 'The local daily request budget is exhausted.',
+  task_budget_exhausted: 'This local Hyperagent task budget is exhausted. Start a new task or raise maxRequestsPerTask.',
   budget_lock_unavailable: 'The local daily request budget is temporarily unavailable.',
   budget_reservation_invalid: 'The local daily request reservation is unavailable.',
   client_disconnected: 'The client disconnected and local polling stopped.',
@@ -363,6 +366,14 @@ export class BridgeServer {
     try {
       if (abort.signal.aborted) throw abort.signal.reason;
       reservation = await this.budgetManager.reserve(this.config, { requestId: serverRequestId });
+      let taskReservation = null;
+      try {
+        taskReservation = await reserveTaskRequest({ promptChars: prompt.length });
+      } catch (taskError) {
+        if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId).catch(() => {});
+        await this.budgetManager.release(reservation, this.config, { reason: 'task_budget_exhausted', provenPreDispatch: true }).catch(() => {});
+        throw Object.assign(taskError, { status: 429, code: 'task_budget_exhausted' });
+      }
       await this.safeAudit({
         event: 'request_reserved',
         requestId: serverRequestId,
@@ -373,8 +384,23 @@ export class BridgeServer {
         toolCount: tools.length,
         dailyUsed: reservation.used,
         dailyLimit: reservation.limit,
+        ...(taskReservation && !taskReservation.skipped
+          ? {
+              taskName: taskReservation.name,
+              taskRequests: `${taskReservation.requestCount}/${taskReservation.requestLimit}`,
+              taskPromptChars: `${taskReservation.promptChars}/${taskReservation.promptCharLimit}`
+            }
+          : {}),
         reservationRef: privateRef(reservation.id, 'reservation')
       });
+      if (taskReservation?.warned) {
+        await this.safeAudit({
+          event: 'task_budget_warning',
+          requestId: serverRequestId,
+          taskName: taskReservation.name,
+          taskPromptChars: `${taskReservation.promptChars}/${taskReservation.promptCharLimit}`
+        }).catch(() => {});
+      }
       if (abort.signal.aborted) throw abort.signal.reason;
       client = this.clientFactory();
       if (abort.signal.aborted) throw abort.signal.reason;
@@ -426,6 +452,9 @@ export class BridgeServer {
       const result = await client.waitForThread(threadId, { signal: abort.signal });
       const output = parseRelayOutput(result.text, tools);
       const completed = { output, ids, model: body.model, threadId, requestId: serverRequestId, streaming };
+      if (output.type === 'function_call') {
+        await commitTaskToolLoop(this.config).catch(() => {});
+      }
       await this.safeAudit({
         event: 'completed',
         requestId: serverRequestId,

@@ -645,3 +645,51 @@ test('disconnect while awaiting an idempotency claim cannot reserve or dispatch'
     await bridge.close();
   }
 });
+
+test('per-task budgets fail closed without consuming the daily slot', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'hacb-bridge-task-'));
+  const previous = process.env.HACB_HOME;
+  process.env.HACB_HOME = home;
+  try {
+    const { startTask, getActiveTask } = await import('../src/config.mjs');
+    await startTask('tiny-task', { maxRequestsPerTask: 1, maxPromptCharsPerTask: 1000000 });
+    assert.ok(await getActiveTask());
+    const config = {
+      bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {}, exposeAllAgents: true,
+      localApiToken: 'test-local-token-12345678901234567890',
+      maxRequestsPerDay: 6,
+      maxRequestsPerTask: 1
+    };
+    const bridge = new BridgeServer(config, {
+      clientFactory: () => ({
+        async listAgents() { return [agent]; },
+        async createThread() { return 'thread_task_budget'; },
+        async waitForThread() { return { text: '{"type":"final","text":"done"}' }; },
+        async close() {}
+      }),
+      auditWriter: async () => {}, logWriter: async () => {}, idempotencyManager: createMemoryIdempotencyManager()
+    });
+    await bridge.start();
+    try {
+      const base = `http://127.0.0.1:${bridge.server.address().port}`;
+      const request = () => fetch(`${base}/v1/responses`, {
+        method: 'POST',
+        headers: { ...AUTH, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'work', stream: false })
+      });
+      const first = await request();
+      assert.equal(first.status, 200);
+      const second = await request();
+      assert.equal(second.status, 429);
+      assert.equal((await second.json()).error.code, 'task_budget_exhausted');
+      const task = await getActiveTask();
+      assert.equal(task.requestCount, 1);
+    } finally {
+      await bridge.close();
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.HACB_HOME;
+    else process.env.HACB_HOME = previous;
+  }
+});

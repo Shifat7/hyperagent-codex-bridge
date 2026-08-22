@@ -8,10 +8,13 @@ import {
   atomicWriteText,
   auditPath,
   getDailyBudgetStatus,
+  getActiveTask,
   loadConfig,
   logPath,
   pidPath,
   saveConfig,
+  startTask,
+  stopTask,
   SAFE_MAX_REQUESTS_PER_DAY,
   stateDir,
   VERSION,
@@ -51,6 +54,9 @@ Usage:
   hacb budget                Show the local daily Hyperagent request cap
   hacb budget --safe         Restore the six-request safe default
   hacb budget --set <count>  Explicitly set a custom daily request cap (1-100)
+  hacb task start <name>     Start a named task with its own Hyperagent budget
+  hacb task status           Show the active task and its budget usage
+  hacb task stop             Close the active task
   hacb serve                 Run the local bridge in the foreground
   hacb start                 Run the local bridge in the background
   hacb stop                  Stop the background bridge
@@ -311,6 +317,33 @@ async function main() {
       const budget = await getDailyBudgetStatus(config);
       console.log(`${budget.day}  ${budget.used}/${budget.limit} slots used  ${budget.remaining} remaining (${budget.committed} committed, ${budget.reserved} reserved)`);
       console.log('Each Codex tool loop can consume multiple Hyperagent requests. Raise the cap only after reviewing credits.');
+      break;
+    }
+    case 'task': {
+      const subcommand = args[0] || 'status';
+      if (subcommand === 'start') {
+        const name = args[1];
+        if (!name) throw new Error('Usage: hacb task start <name>');
+        const task = await startTask(name, {
+          maxRequestsPerTask: config.maxRequestsPerTask,
+          maxPromptCharsPerTask: config.maxPromptCharsPerTask,
+          warnAtPromptCharsPerTask: config.warnAtPromptCharsPerTask
+        });
+        console.log(`Started task '${task.name}'. Budget: ${task.limits.maxRequestsPerTask} requests, ${task.limits.maxPromptCharsPerTask} prompt chars.`);
+      } else if (subcommand === 'stop') {
+        const stopped = await stopTask();
+        console.log(stopped ? `Stopped task '${stopped.name}' (${stopped.requestCount} requests, ${stopped.promptChars} prompt chars).` : 'No active task.');
+      } else if (subcommand === 'status') {
+        const task = await getActiveTask();
+        if (!task) {
+          console.log('No active task. Start one with: hacb task start <name>');
+        } else {
+          console.log(`Active task '${task.name}' (started ${task.startedAt})`);
+          console.log(`Requests: ${task.requestCount}/${(task.limits || {}).maxRequestsPerTask ?? '?'}   Prompt chars: ${task.promptChars}/${(task.limits || {}).maxPromptCharsPerTask ?? '?'}`);
+        }
+      } else {
+        throw new Error('Usage: hacb task [start <name> | status | stop]');
+      }
       break;
     }
     case 'setup': {
