@@ -575,6 +575,107 @@ test('disconnect during preflight never reserves budget or creates a Hyperagent 
   }
 });
 
+test('every dispatched request logs estimated prompt usage and retention limits', async () => {
+  await withBridge('{"type":"final","text":"cost check"}', async (base, harness) => {
+    const response = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hyperagent/sol-coder',
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'audit my cost fields' }] }],
+        tools: [{ type: 'function', name: 'shell', description: 'Run shell commands.', parameters: { type: 'object' } }],
+        stream: false
+      })
+    });
+    assert.equal(response.status, 200);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const reserved = harness.audits.find(item => item.event === 'request_reserved');
+    const completed = harness.audits.find(item => item.event === 'completed');
+    for (const field of [
+      'estimatedPromptTokens', 'usageSource',
+      'relayInstructionChars', 'conversationChars', 'toolResultChars', 'toolSchemaChars', 'payloadChars',
+      'maxInputChars', 'maxTurnChars', 'maxConversationTurns', 'maxForwardedTools'
+    ]) {
+      assert.ok(field in reserved, `request_reserved is missing ${field}`);
+    }
+    assert.equal(reserved.promptChars > 0, true);
+    assert.equal(reserved.estimatedPromptTokens, Math.ceil(reserved.promptChars / 4));
+    assert.equal(reserved.toolCount, 1);
+    assert.equal(reserved.usageSource, 'unavailable');
+    assert.ok('dailyUsed' in reserved);
+    assert.ok('dailyLimit' in reserved);
+    assert.equal(completed.outputType, 'final');
+    assert.ok(completed.estimatedPromptTokens >= 1);
+    const serialized = JSON.stringify(harness.audits);
+    assert.doesNotMatch(serialized, /audit my cost fields/);
+  });
+});
+
+test('prompt excerpt capture stays off by default and writes bounded excerpts when enabled', async () => {
+  const excerptCalls = [];
+  const baseConfig = {
+    bridgeHost: '127.0.0.1',
+    bridgePort: 0,
+    aliases: {},
+    exposeAllAgents: true,
+    runTimeoutMs: 300000,
+    pollIntervalMs: 5,
+    localApiToken: 'test-local-token-12345678901234567890'
+  };
+  const factory = {
+    async listAgents() { return [agent]; },
+    async createThread() { return 'thread_excerpt_1'; },
+    async waitForThread() { return { text: '{"type":"final","text":"done"}', status: 'completed' }; },
+    async close() {}
+  };
+  const defaults = new BridgeServer(baseConfig, {
+    clientFactory: () => ({ ...factory }),
+    auditWriter: async () => {}, logWriter: async () => {},
+    excerptWriter: async () => { throw new Error('excerpt writer must not be constructed by default'); },
+    budgetGuard: async () => ({ used: 0, committed: 0, reserved: 0, limit: 6, remaining: 6 }),
+    idempotencyManager: createMemoryIdempotencyManager()
+  });
+  await defaults.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${defaults.server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'no excerpts please', stream: false })
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await defaults.close();
+  }
+
+  const enabled = new BridgeServer({ ...baseConfig, debugPromptExcerpts: true }, {
+    clientFactory: () => ({ ...factory }),
+    auditWriter: async () => {}, logWriter: async () => {},
+    excerptWriter: async event => excerptCalls.push(event),
+    budgetGuard: async () => ({ used: 0, committed: 0, reserved: 0, limit: 6, remaining: 6 }),
+    idempotencyManager: createMemoryIdempotencyManager()
+  });
+  await enabled.start();
+  try {
+    const marker = `private-excerpt-marker-${'b'.repeat(400)}`;
+    const response = await fetch(`http://127.0.0.1:${enabled.server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'hyperagent/sol-coder', input: marker, stream: false })
+    });
+    assert.equal(response.status, 200);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(excerptCalls.length, 1);
+    const entry = excerptCalls[0];
+    assert.match(entry.requestId, /^req_/);
+    assert.ok(entry.conversationExcerpt.includes('private-excerpt-marker'));
+    for (const value of [entry.relayInstructionsExcerpt, entry.conversationExcerpt, entry.toolSchemaExcerpt]) {
+      if (value != null) assert.ok(String(value).length <= 240);
+    }
+  } finally {
+    await enabled.close();
+  }
+});
+
 test('disconnect while awaiting an idempotency claim cannot reserve or dispatch', async () => {
   let resolveClaim;
   let claimStarted;

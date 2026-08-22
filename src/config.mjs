@@ -54,6 +54,10 @@ export function gatewayLogPath() {
   return join(stateDir(), 'gateway.jsonl');
 }
 
+export function promptExcerptsPath() {
+  return join(stateDir(), 'prompt-excerpts.jsonl');
+}
+
 function usageLockPath() {
   return join(stateDir(), 'usage.lock');
 }
@@ -99,7 +103,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxConversationTurns: 8,
   maxForwardedTools: 32,
   maxPromptChars: 70000,
-  blockMultiAgentTools: true
+  blockMultiAgentTools: true,
+  debugPromptExcerpts: false
 });
 
 export async function ensureStateDir() {
@@ -195,6 +200,14 @@ export async function appendAudit(event) {
 export async function appendGatewayLog(event) {
   await ensureStateDir();
   const path = gatewayLogPath();
+  const entry = { at: new Date().toISOString(), ...event };
+  await appendFile(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {});
+}
+
+export async function appendPromptExcerpt(event) {
+  await ensureStateDir();
+  const path = promptExcerptsPath();
   const entry = { at: new Date().toISOString(), ...event };
   await appendFile(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
   await chmod(path, 0o600).catch(() => {});

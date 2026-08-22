@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import {
   buildAgentModels,
   buildRelayPrompt,
+  buildRelayPromptWithMetrics,
+  estimateTokens,
   extractClientTools,
   modelInfo,
   parseRelayOutput,
   resolveAgent,
+  retentionLimits,
   slugify,
   sseEvents
 } from '../src/protocol.mjs';
@@ -65,6 +68,59 @@ test('relay prompt strips injected context, bounds history, and defaults to low 
   assert.match(prompt, /README contents/);
   assert.match(prompt, /"name":"shell"/);
   assert.match(prompt, /"reasoning_effort":"low"/);
+});
+
+test('relay prompt metrics break the prompt into auditable sections', () => {
+  const body = {
+    model: 'hyperagent/sol-coder',
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x'.repeat(400) }] },
+      { type: 'function_call_output', call_id: 'call_1', output: 'y'.repeat(600) },
+      { type: 'custom_tool_call_output', call_id: 'call_2', output: 'z'.repeat(200) }
+    ],
+    tools: [
+      { type: 'function', name: 'shell', description: 'Run shell commands.', parameters: { type: 'object' } },
+      { type: 'function', name: 'read_file', description: 'Read a file.', parameters: { type: 'object' } }
+    ]
+  };
+  const config = { defaultReasoningEffort: 'low', maxInputChars: 24000, maxTurnChars: 6000, maxConversationTurns: 8, maxForwardedTools: 32 };
+  const { prompt, breakdown } = buildRelayPromptWithMetrics(body, agents[0], config);
+  assert.equal(prompt, buildRelayPrompt(body, agents[0], config));
+  assert.equal(breakdown.totalChars, prompt.length);
+  assert.equal(breakdown.estimatedTokens, Math.ceil(prompt.length / 4));
+  assert.equal(estimateTokens(0), 0);
+  assert.equal(estimateTokens(7), 2);
+  assert.equal(
+    breakdown.sections.relayInstructionChars + breakdown.sections.payloadChars,
+    breakdown.totalChars
+  );
+  const toolResultText = (callId, output) => JSON.stringify({ call_id: callId, output });
+  const expectedToolResults = toolResultText('call_1', 'y'.repeat(600)).length + toolResultText('call_2', 'z'.repeat(200)).length;
+  assert.equal(breakdown.sections.conversationChars, 400 + expectedToolResults);
+  assert.equal(breakdown.sections.toolResultChars, expectedToolResults);
+  assert.ok(breakdown.sections.toolSchemaChars > 0 && breakdown.sections.toolSchemaChars <= breakdown.sections.payloadChars);
+  assert.equal(breakdown.limits.maxInputChars, 24000);
+  assert.equal(breakdown.limits.maxTurnChars, 6000);
+  assert.equal(breakdown.limits.maxConversationTurns, 8);
+  assert.equal(breakdown.limits.maxForwardedTools, 32);
+  assert.equal(breakdown.forwardedToolCount, 2);
+  assert.equal(breakdown.retainedTurns, 3);
+  assert.doesNotMatch(JSON.stringify(breakdown), /x{20,}|y{20,}|z{20,}/);
+});
+
+test('prompt excerpt capture is opt-in and bounded', () => {
+  const body = { model: 'hyperagent/sol-coder', input: 'secret-user-content-marker-' + 'a'.repeat(500) };
+  const withoutFlag = buildRelayPromptWithMetrics(body, agents[0], {});
+  assert.equal(withoutFlag.excerpts, undefined);
+  const withFlag = buildRelayPromptWithMetrics(body, agents[0], { debugPromptExcerpts: true });
+  assert.ok(withFlag.excerpts.conversationExcerpt.includes('secret-user-content-marker'));
+  for (const value of Object.values(withFlag.excerpts)) assert.ok(String(value).length <= 240);
+});
+
+test('retention limits clamp unsafe config values', () => {
+  assert.deepEqual(retentionLimits({}), { maxTurnChars: 12000, maxConversationTurns: 12, maxInputChars: 48000, maxForwardedTools: 64 });
+  const clamped = retentionLimits({ maxTurnChars: 10, maxConversationTurns: 1, maxInputChars: 10, maxForwardedTools: 1 });
+  assert.deepEqual(clamped, { maxTurnChars: 1000, maxConversationTurns: 2, maxInputChars: 1000, maxForwardedTools: 4 });
 });
 
 test('additional_tools and MCP namespaces are flattened while multi-agent tools are blocked', () => {

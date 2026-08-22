@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import {
   appendAudit,
   appendGatewayLog,
+  appendPromptExcerpt,
   claimIdempotency,
   commitDailyRequestBudget,
   deleteIdempotency,
@@ -18,7 +19,7 @@ import {
 import { HyperagentClient } from './hyperagent.mjs';
 import {
   buildAgentModels,
-  buildRelayPrompt,
+  buildRelayPromptWithMetrics,
   extractClientTools,
   modelInfo,
   nonStreamingResponse,
@@ -179,13 +180,16 @@ function etagFor(value) {
 }
 
 export class BridgeServer {
-  constructor(config, { clientFactory, auditWriter, logWriter, budgetGuard, budgetManager, idempotencyManager } = {}) {
+  constructor(config, { clientFactory, auditWriter, logWriter, excerptWriter, budgetGuard, budgetManager, idempotencyManager } = {}) {
     this.config = config;
     this.server = null;
     this.agentCache = { at: 0, agents: [] };
     this.clientFactory = clientFactory || (() => new HyperagentClient(this.config));
     this.auditWriter = auditWriter || appendAudit;
     this.logWriter = logWriter || appendGatewayLog;
+    this.excerptWriter = config.debugPromptExcerpts
+      ? (excerptWriter || appendPromptExcerpt)
+      : null;
     this.budgetManager = budgetManager || (budgetGuard
       ? {
           reserve: async configValue => ({ id: null, ...await budgetGuard(configValue) }),
@@ -346,10 +350,12 @@ export class BridgeServer {
     }
     let tools;
     let prompt;
+    let breakdown;
+    let excerpts;
     const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
     try {
       tools = extractClientTools(body, this.config);
-      prompt = buildRelayPrompt(body, agent, this.config, tools);
+      ({ prompt, breakdown, excerpts } = buildRelayPromptWithMetrics(body, agent, this.config, tools));
     } catch (error) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
       throw error;
@@ -357,6 +363,28 @@ export class BridgeServer {
     if (prompt.length > Math.max(10000, Number(this.config.maxPromptChars || 70000))) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
       throw Object.assign(new Error(`Sanitized relay prompt is still too large (${prompt.length} chars). Start a new Codex chat or reduce attached context.`), { status: 413, code: 'prompt_too_large' });
+    }
+    const costMetrics = {
+      estimatedPromptTokens: breakdown.estimatedTokens,
+      usageSource: breakdown.usageSource,
+      relayInstructionChars: breakdown.sections.relayInstructionChars,
+      conversationChars: breakdown.sections.conversationChars,
+      toolResultChars: breakdown.sections.toolResultChars,
+      toolSchemaChars: breakdown.sections.toolSchemaChars,
+      payloadChars: breakdown.sections.payloadChars,
+      retainedTurns: breakdown.retainedTurns,
+      maxInputChars: breakdown.limits.maxInputChars,
+      maxTurnChars: breakdown.limits.maxTurnChars,
+      maxConversationTurns: breakdown.limits.maxConversationTurns,
+      maxForwardedTools: breakdown.limits.maxForwardedTools
+    };
+    if (this.excerptWriter && excerpts) {
+      await this.excerptWriter({
+        requestId: serverRequestId,
+        estimatedTokens: breakdown.estimatedTokens,
+        totalChars: breakdown.totalChars,
+        ...excerpts
+      }).catch(() => {});
     }
     const ids = responseIds();
     const streaming = body.stream !== false;
@@ -371,8 +399,9 @@ export class BridgeServer {
         streaming,
         promptChars: prompt.length,
         toolCount: tools.length,
-        dailyUsed: reservation.used,
-        dailyLimit: reservation.limit,
+        ...costMetrics,
+        dailyUsed: reservation.used ?? null,
+        dailyLimit: reservation.limit ?? null,
         reservationRef: privateRef(reservation.id, 'reservation')
       });
       if (abort.signal.aborted) throw abort.signal.reason;
@@ -433,6 +462,8 @@ export class BridgeServer {
         agentRef: privateRef(agent.id, 'agent'),
         threadRef: privateRef(threadId, 'thread'),
         outputType: output.type,
+        promptChars: prompt.length,
+        ...costMetrics,
         dailyCommitted: budget.committed,
         dailyLimit: budget.limit,
         usageSource: 'unavailable'
