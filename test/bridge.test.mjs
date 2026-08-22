@@ -645,3 +645,121 @@ test('disconnect while awaiting an idempotency claim cannot reserve or dispatch'
     await bridge.close();
   }
 });
+
+test('identical requests without an idempotency key replay from the fingerprint cache', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'hacb-bridge-cache-'));
+  const previous = process.env.HACB_HOME;
+  process.env.HACB_HOME = home;
+  try {
+    let created = 0;
+    const bridge = new BridgeServer({
+      bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {}, exposeAllAgents: true,
+      localApiToken: 'test-local-token-12345678901234567890',
+      maxRequestsPerDay: 20,
+      enableResponseCache: true,
+      responseCacheTtlMs: 600000
+    }, {
+      clientFactory: () => ({
+        async listAgents() { return [agent]; },
+        async createThread() { created += 1; return 'thread_cache_once'; },
+        async waitForThread() { return { text: '{"type":"final","text":"cached"}' }; },
+        async close() {}
+      }),
+      auditWriter: async () => {}, logWriter: async () => {}, idempotencyManager: createMemoryIdempotencyManager()
+    });
+    await bridge.start();
+    try {
+      const base = `http://127.0.0.1:${bridge.server.address().port}`;
+      const body = JSON.stringify({ model: 'hyperagent/sol-coder', input: 'same body', stream: false });
+      const first = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body });
+      assert.equal(first.status, 200);
+      const second = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body });
+      assert.equal(second.status, 200);
+      assert.equal(second.headers.get('x-response-cache-replayed'), 'true');
+      assert.equal((await second.json()).id, (await first.json()).id);
+      assert.equal(created, 1);
+
+      const changed = await fetch(`${base}/v1/responses`, {
+        method: 'POST',
+        headers: { ...AUTH, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'different body', stream: false })
+      });
+      assert.equal(changed.headers.get('x-response-cache-replayed'), null);
+      assert.equal(created, 2);
+    } finally {
+      await bridge.close();
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.HACB_HOME;
+    else process.env.HACB_HOME = previous;
+  }
+});
+
+test('failed dispatches are never cached and an explicit Idempotency-Key still wins', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'hacb-bridge-cache2-'));
+  const previous = process.env.HACB_HOME;
+  process.env.HACB_HOME = home;
+  try {
+    let attempts = 0;
+    const bridge = new BridgeServer({
+      bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {}, exposeAllAgents: true,
+      localApiToken: 'test-local-token-12345678901234567890',
+      maxRequestsPerDay: 20,
+      enableResponseCache: true
+    }, {
+      clientFactory: () => ({
+        async listAgents() { return [agent]; },
+        async createThread() {
+          attempts += 1;
+          throw Object.assign(new Error('upstream down'), { dispatchState: 'not_dispatched' });
+        },
+        async close() {}
+      }),
+      auditWriter: async () => {}, logWriter: async () => {}, idempotencyManager: createMemoryIdempotencyManager()
+    });
+    await bridge.start();
+    try {
+      const base = `http://127.0.0.1:${bridge.server.address().port}`;
+      const body = JSON.stringify({ model: 'hyperagent/sol-coder', input: 'will fail', stream: false });
+      const response = () => fetch(`${base}/v1/responses`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body });
+      assert.equal((await response()).status, 500);
+      assert.equal((await response()).status, 500);
+      assert.equal(attempts, 2);
+    } finally {
+      await bridge.close();
+    }
+
+    const keyed = new BridgeServer({
+      bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {}, exposeAllAgents: true,
+      localApiToken: 'test-local-token-12345678901234567890',
+      maxRequestsPerDay: 20,
+      enableResponseCache: true
+    }, {
+      clientFactory: () => ({
+        async listAgents() { return [agent]; },
+        async createThread() { attempts += 1; return `thread_keyed_${attempts}`; },
+        async waitForThread() { return { text: '{"type":"final","text":"keyed"}' }; },
+        async close() {}
+      }),
+      auditWriter: async () => {}, logWriter: async () => {}, idempotencyManager: createMemoryIdempotencyManager()
+    });
+    await keyed.start();
+    try {
+      const base = `http://127.0.0.1:${keyed.server.address().port}`;
+      const headers = { ...AUTH, 'content-type': 'application/json', 'idempotency-key': 'explicit-key-wins' };
+      const body = JSON.stringify({ model: 'hyperagent/sol-coder', input: 'keyed replay', stream: false });
+      const first = await fetch(`${base}/v1/responses`, { method: 'POST', headers, body });
+      const second = await fetch(`${base}/v1/responses`, { method: 'POST', headers, body });
+      assert.equal(first.status, 200);
+      assert.equal(second.headers.get('x-idempotency-replayed'), 'true');
+      assert.equal(second.headers.get('x-response-cache-replayed'), null);
+    } finally {
+      await keyed.close();
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.HACB_HOME;
+    else process.env.HACB_HOME = previous;
+  }
+});

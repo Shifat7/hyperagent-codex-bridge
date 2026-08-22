@@ -12,6 +12,8 @@ import {
   reconcileIdempotency,
   releaseDailyRequestBudget,
   reserveDailyRequestBudget,
+  lookupResponseCache,
+  storeResponseCache,
   updateIdempotency,
   VERSION
 } from './config.mjs';
@@ -179,13 +181,16 @@ function etagFor(value) {
 }
 
 export class BridgeServer {
-  constructor(config, { clientFactory, auditWriter, logWriter, budgetGuard, budgetManager, idempotencyManager } = {}) {
+  constructor(config, { clientFactory, auditWriter, logWriter, cacheManager, budgetGuard, budgetManager, idempotencyManager } = {}) {
     this.config = config;
     this.server = null;
     this.agentCache = { at: 0, agents: [] };
     this.clientFactory = clientFactory || (() => new HyperagentClient(this.config));
     this.auditWriter = auditWriter || appendAudit;
     this.logWriter = logWriter || appendGatewayLog;
+    this.cacheManager = config.enableResponseCache === true
+      ? (cacheManager || { lookup: lookupResponseCache, store: storeResponseCache })
+      : null;
     this.budgetManager = budgetManager || (budgetGuard
       ? {
           reserve: async configValue => ({ id: null, ...await budgetGuard(configValue) }),
@@ -251,11 +256,12 @@ export class BridgeServer {
     }, { etag: tag, 'cache-control': 'private, max-age=60' });
   }
 
-  renderCompleted(response, result, { replayed = false, createdSent = false } = {}) {
+  renderCompleted(response, result, { replayed = false, cacheReplayed = false, createdSent = false } = {}) {
     const headers = {
       'x-hyperagent-thread-id': result.threadId,
       'x-usage-source': 'unavailable',
-      ...(replayed ? { 'x-idempotency-replayed': 'true' } : {})
+      ...(replayed ? { 'x-idempotency-replayed': 'true' } : {}),
+      ...(cacheReplayed ? { 'x-response-cache-replayed': 'true' } : {})
     };
     if (result.streaming) {
       if (!response.headersSent) {
@@ -289,6 +295,19 @@ export class BridgeServer {
     if (!body.model) throw Object.assign(new Error('The model field is required.'), { status: 400, code: 'model_required' });
     const keyHash = idempotencyKey(request);
     const fingerprint = requestFingerprint(body);
+    if (!keyHash && this.cacheManager) {
+      let cached = null;
+      try {
+        cached = await this.cacheManager.lookup(fingerprint, this.config);
+      } catch {
+        cached = null;
+      }
+      if (cached?.result) {
+        await this.safeLog({ event: 'response_cache_replayed', requestId: serverRequestId, originalRequestId: cached.result.requestId });
+        this.renderCompleted(response, cached.result, { cacheReplayed: true });
+        return;
+      }
+    }
     const abort = new AbortController();
     const cancel = () => {
       if (!abort.signal.aborted) abort.abort(abortError());
@@ -442,6 +461,9 @@ export class BridgeServer {
           state: 'completed',
           result: completed
         }, this.config);
+      }
+      if (!keyHash && this.cacheManager) {
+        await this.cacheManager.store(fingerprint, completed, this.config).catch(() => {});
       }
       this.renderCompleted(response, completed, { createdSent: streaming });
     } catch (error) {
