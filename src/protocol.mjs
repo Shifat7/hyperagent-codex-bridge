@@ -302,7 +302,7 @@ export function extractClientTools(body, config = {}) {
   return normalizeTools(tools, config);
 }
 
-export function buildRelayPrompt(body, agent, config = {}, extractedTools = null) {
+export function buildRelayPrompt(body, agent, config = {}, extractedTools = null, checkpoint = null) {
   const turns = normalizeInput(body.input, config);
   const tools = extractedTools || extractClientTools(body, config);
   const instructions = 'Act as the Codex reasoning backend. Use only the forwarded client tools and return one compact JSON action.';
@@ -320,6 +320,7 @@ export function buildRelayPrompt(body, agent, config = {}, extractedTools = null
     selected_hyperagent_agent: agent.name,
     reasoning_effort: effort,
     developer_instructions: instructions,
+    ...(checkpoint ? { project_checkpoint: `Project checkpoint:\n${checkpoint}` } : {}),
     conversation: turns,
     client_tools: tools
   };

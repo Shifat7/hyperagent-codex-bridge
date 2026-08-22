@@ -232,6 +232,41 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Durable checkpoint memory
+
+Instead of re-sending long chat history every turn, the bridge injects a bounded local checkpoint (4,000 chars default) from `.hacb/` in your project directory before recent conversation turns. Missing files are ignored; path traversal in configured names is rejected; `"enableCheckpointMemory": false` disables it entirely. `.hacb/` is gitignored by default.
+
+Let Codex maintain these files through its normal file tools — no Hyperagent calls are spent summarising:
+
+```md
+# Codex State
+
+## Current goal
+
+## Files touched
+
+## Decisions made
+
+## Tests run
+
+## Known issues
+
+## Next exact step
+```
+
+Config:
+
+```json
+{
+  "enableCheckpointMemory": true,
+  "checkpointDir": ".hacb",
+  "checkpointFiles": ["CODEX_STATE.md", "TASK_PLAN.md", "TEST_LOG.md", "DECISIONS.md"],
+  "maxCheckpointChars": 4000
+}
+```
+
+The pattern: Codex updates checkpoint files locally, the bridge injects them compactly, and old chat turns can then be dropped without losing durable context.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

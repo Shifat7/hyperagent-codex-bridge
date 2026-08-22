@@ -99,7 +99,16 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxConversationTurns: 8,
   maxForwardedTools: 32,
   maxPromptChars: 70000,
-  blockMultiAgentTools: true
+  blockMultiAgentTools: true,
+  enableCheckpointMemory: true,
+  checkpointDir: '.hacb',
+  checkpointFiles: [
+    'CODEX_STATE.md',
+    'TASK_PLAN.md',
+    'TEST_LOG.md',
+    'DECISIONS.md'
+  ],
+  maxCheckpointChars: 4000
 });
 
 export async function ensureStateDir() {
