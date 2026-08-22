@@ -244,6 +244,7 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+<<<<<<< HEAD
 ### Smart tool shortlisting
 
 Every turn is classified locally (`final_answer_only`, `read_or_search`, `edit_code`, `run_command`, `debug_failure`, `unknown`) and only the tool categories that task type needs are forwarded to Hyperagent. Tool schemas are minimised to argument names, types, and required lists; descriptions are capped at 160 characters. Exact tool names are never invented or renamed, conversations that already used tools keep them, and unknown turns keep the full inventory.
@@ -280,6 +281,28 @@ After:  1,370 prompt chars (-31%)
 
 The saving applies to every sampling request of every tool loop. Recommended relay-agent setup is unchanged: use `RELAY_AGENT_PROMPT.md` as the system prompt, disable the agent's own Hyperagent tools, pin its model, and keep reasoning effort low.
 
+=======
+### Tool result reducer
+
+Tool outputs sent back to Hyperagent are compressed before they enter the conversation: ANSI codes and progress-bar noise are stripped, successful command output keeps its last 20 meaningful lines, failed runs keep the first error block (assertion diffs, file paths with line/column) plus the last 80 lines, and grep-style output is capped at 5 matches per file with an explicit remainder note. Reduced outputs carry a `[tool output reduced by Hyperagent Codex Bridge: N lines -> M]` marker. User prose and assistant turns are never reduced.
+
+```json
+{
+  "enableToolResultReducer": true,
+  "maxSuccessfulCommandLines": 20,
+  "maxFailedCommandLines": 80,
+  "maxSearchMatchesPerFile": 5
+}
+```
+
+Measured locally on a synthetic 184-line failing `npm test` log:
+
+```text
+Before: 6,339 chars (184 lines)
+After:    204 chars (6 lines) — error block and assertion diff retained
+```
+
+>>>>>>> pr-03-tool-result-reducer
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

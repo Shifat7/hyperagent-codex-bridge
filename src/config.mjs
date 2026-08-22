@@ -107,7 +107,11 @@ export const DEFAULT_CONFIG = Object.freeze({
   debugPromptExcerpts: false,
   enableSmartToolSelection: true,
   forwardFullToolSchemas: false,
-  maxToolDescriptionChars: 160
+  maxToolDescriptionChars: 160,
+  enableToolResultReducer: true,
+  maxSuccessfulCommandLines: 20,
+  maxFailedCommandLines: 80,
+  maxSearchMatchesPerFile: 5
 });
 
 export async function ensureStateDir() {

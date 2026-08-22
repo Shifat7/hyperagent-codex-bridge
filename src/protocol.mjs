@@ -185,7 +185,101 @@ export function estimateTokens(chars) {
   return Math.ceil(Math.max(0, Number(chars) || 0) / 4);
 }
 
-function normalizeInput(input, config = {}) {
+const ANSI_PATTERN = /\x1B(?:\[[0-9;]*[A-Za-z]|\][^\x07]*(?:\x07|\x1B\\))/g;
+const FAILURE_LINE_PATTERN = /\b(error\b|failed\b|failing\b|failure\b|FAIL(?:ED)?\b|AssertionError|ExpectationFailed|Traceback \(most recent call last\)|error TS\d+|ELIFECYCLE|✗|✘)/i;
+const NOISE_LINE_PATTERN = /^(?:\d{1,3}%\s|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Downloading|Extracting|Installing|Collecting|Preparing metadata|Using cached|Requirement already satisfied|Progress:)/i;
+const SEARCH_LINE_PATTERN = /^([^:\s]+):\d+(?::\d+)?:/;
+const EXIT_CODE_FAILED_PATTERN = /\bexit code:? [1-9]/i;
+
+function meaningfulLines(text) {
+  const cleaned = [];
+  let previousEmpty = false;
+  for (const rawLine of String(text).replace(ANSI_PATTERN, '').replace(/\r\n/g, '\n').split('\n')) {
+    const line = rawLine.includes('\r')
+      ? ([...rawLine.split('\r')].reverse().find(part => part.trim()) ?? '')
+      : rawLine;
+    const trimmed = line.replace(/\s+$/, '');
+    if (!trimmed.trim()) {
+      if (previousEmpty) continue;
+      previousEmpty = true;
+      cleaned.push('');
+      continue;
+    }
+    previousEmpty = false;
+    if (NOISE_LINE_PATTERN.test(trimmed)) continue;
+    cleaned.push(trimmed);
+  }
+  while (cleaned.length && !cleaned[0].trim()) cleaned.shift();
+  while (cleaned.length && !cleaned[cleaned.length - 1].trim()) cleaned.pop();
+  return cleaned;
+}
+function capSearchMatches(lines, maxPerFile) {
+  const perFile = new Map();
+  let dropped = false;
+  const kept = [];
+  for (const line of lines) {
+    const match = line.match(SEARCH_LINE_PATTERN);
+    if (!match) {
+      kept.push(line);
+      continue;
+    }
+    const file = match[1];
+    const seen = perFile.get(file) || 0;
+    perFile.set(file, seen + 1);
+    if (seen < maxPerFile) kept.push(line);
+    else dropped = true;
+  }
+  for (const [file, count] of perFile) {
+    if (count > maxPerFile) kept.push(`+${count - maxPerFile} more matches in ${file}`);
+  }
+  return { kept, dropped };
+}
+
+export function reduceToolOutput(output, config = {}) {
+  const originalText = typeof output === 'string' ? output : JSON.stringify(output ?? '');
+  const lines = meaningfulLines(originalText);
+  let working = lines;
+  let reducedAny = false;
+  const searchCapped = capSearchMatches(lines, Math.max(1, Number(config.maxSearchMatchesPerFile || 5)));
+  if (searchCapped.dropped) reducedAny = true;
+  working = searchCapped.kept;
+  const failed = FAILURE_LINE_PATTERN.test(working.join('\n')) || EXIT_CODE_FAILED_PATTERN.test(working.join('\n'));
+  if (failed) {
+    const limit = Math.max(10, Number(config.maxFailedCommandLines || 80));
+    if (working.length > limit) {
+      const errorIndex = working.findIndex(line => FAILURE_LINE_PATTERN.test(line) || EXIT_CODE_FAILED_PATTERN.test(line));
+      const ranges = [];
+      if (errorIndex >= 0) {
+        ranges.push({ start: Math.max(0, errorIndex - 2), end: Math.min(working.length, errorIndex + 13) });
+      }
+      ranges.push({ start: Math.max(ranges.length ? ranges[0].end : 0, working.length - limit), end: working.length });
+      const merged = [];
+      for (const range of ranges) {
+        if (range.start >= range.end) continue;
+        const previous = merged[merged.length - 1];
+        if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+        else merged.push({ ...range });
+      }
+      const out = [];
+      for (const range of merged) {
+        if (out.length) out.push('[...]');
+        for (let index = range.start; index < range.end; index += 1) out.push(working[index]);
+      }
+      working = out;
+      reducedAny = true;
+    }
+  } else {
+    const limit = Math.max(4, Number(config.maxSuccessfulCommandLines || 20));
+    if (working.length > limit) {
+      working = working.slice(-limit);
+      reducedAny = true;
+    }
+  }
+  if (!reducedAny) return working.join('\n');
+  return `${working.join('\n')}\n[tool output reduced by Hyperagent Codex Bridge: ${lines.length} lines -> ${working.length}]`;
+}
+
+export function normalizeInput(input, config = {}) {
   if (typeof input === 'string') return [{ role: 'user', text: compact(input, retentionLimits(config).maxTurnChars) }];
   if (!Array.isArray(input)) return [{ role: 'user', text: compact(input, retentionLimits(config).maxTurnChars) }];
   const { maxTurnChars: perTurnLimit, maxConversationTurns: maxTurns, maxInputChars: maxTotal } = retentionLimits(config);
@@ -205,7 +299,8 @@ function normalizeInput(input, config = {}) {
       continue;
     }
     if (type === 'function_call_output') {
-      turns.push({ role: 'tool_result', text: compact({ call_id: item.call_id, output: item.output }, perTurnLimit) });
+      const output = config.enableToolResultReducer ? reduceToolOutput(item.output, config) : item.output;
+      turns.push({ role: 'tool_result', text: compact({ call_id: item.call_id, output }, perTurnLimit) });
       continue;
     }
     if (type === 'custom_tool_call') {
@@ -213,7 +308,8 @@ function normalizeInput(input, config = {}) {
       continue;
     }
     if (type === 'custom_tool_call_output') {
-      turns.push({ role: 'custom_tool_result', text: compact({ call_id: item.call_id, output: item.output }, perTurnLimit) });
+      const output = config.enableToolResultReducer ? reduceToolOutput(item.output, config) : item.output;
+      turns.push({ role: 'custom_tool_result', text: compact({ call_id: item.call_id, output }, perTurnLimit) });
       continue;
     }
     if (type === 'tool_search_call') {
