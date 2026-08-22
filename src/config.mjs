@@ -104,7 +104,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxForwardedTools: 32,
   maxPromptChars: 70000,
   blockMultiAgentTools: true,
-debugPromptExcerpts: false,
+  debugPromptExcerpts: false,
   enableSmartToolSelection: true,
   forwardFullToolSchemas: false,
   maxToolDescriptionChars: 160,
@@ -112,7 +112,7 @@ debugPromptExcerpts: false,
   maxSuccessfulCommandLines: 20,
   maxFailedCommandLines: 80,
   maxSearchMatchesPerFile: 5,
-enableCheckpointMemory: true,
+  enableCheckpointMemory: true,
   checkpointDir: '.hacb',
   checkpointFiles: [
     'CODEX_STATE.md',
@@ -120,7 +120,8 @@ enableCheckpointMemory: true,
     'TEST_LOG.md',
     'DECISIONS.md'
   ],
-  maxCheckpointChars: 4000});
+  maxCheckpointChars: 4000
+});
 
 export async function ensureStateDir() {
   await mkdir(stateDir(), { recursive: true, mode: 0o700 });
