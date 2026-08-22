@@ -645,3 +645,72 @@ test('disconnect while awaiting an idempotency claim cannot reserve or dispatch'
     await bridge.close();
   }
 });
+
+function routingHarness(routes, requestedModel = 'hyperagent/sol-coder') {
+  const createdFor = [];
+  const audits = [];
+  const logs = [];
+  const agents = [
+    { id: 'agent-cheap-000001', name: 'cheap-coder', description: 'cheap', model: 'm/cheap' },
+    { id: 'agent-debug-000002', name: 'debugger', description: 'debug', model: 'm/debug' }
+  ];
+  const config = {
+    bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {},
+    exposeAllAgents: true, runTimeoutMs: 300000, pollIntervalMs: 5,
+    localApiToken: 'test-local-token-12345678901234567890',
+    enableAgentRouting: routes !== null,
+    ...(routes ? { agentRoutes: routes } : {})
+  };
+  const bridge = new BridgeServer(config, {
+    clientFactory: () => ({
+      async listAgents() { return agents; },
+      async createThread(agentId) { createdFor.push(agentId); return `thread_${agentId}`; },
+      async waitForThread() { return { text: '{"type":"final","text":"routed"}' }; },
+      async close() {}
+    }),
+    auditWriter: async event => audits.push(event),
+    logWriter: async event => logs.push(event),
+    budgetGuard: async () => ({ used: 0, committed: 0, reserved: 0, limit: 20, remaining: 20 }),
+    idempotencyManager: createMemoryIdempotencyManager()
+  });
+  return { bridge, createdFor, audits, logs, requestedModel };
+}
+
+async function requestFrom(bridge, input, tools = []) {
+  await bridge.start();
+  try {
+    const base = `http://127.0.0.1:${bridge.server.address().port}`;
+    return await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'cheap-coder', input, tools, stream: false })
+    });
+  } finally {
+    await bridge.close();
+  }
+}
+
+test('enabled routing substitutes the mapped agent and logs the reason', async () => {
+  const harness = routingHarness({ debug_failure: 'debugger', tool_selection: 'debugger' });
+  const response = await requestFrom(harness.bridge, 'Tests fail with AssertionError. Inspect why.');
+  assert.equal(response.status, 200);
+  assert.deepEqual(harness.createdFor, ['agent-debug-000002']);
+  const reserved = harness.audits.find(item => item.event === 'request_reserved');
+  assert.equal(reserved.route, 'debug_failure');
+  assert.equal(reserved.routeTarget, 'debugger');
+});
+
+test('unknown route targets fall back to the requested model without substitution', async () => {
+  const harness = routingHarness({ tool_selection: 'hyperagent/does-not-exist' });
+  const response = await requestFrom(harness.bridge, 'Inspect the module.', [{ type: 'function', name: 'shell', parameters: { type: 'object' } }]);
+  assert.equal(response.status, 200);
+  assert.deepEqual(harness.createdFor, ['agent-cheap-000001']);
+  assert.ok(harness.logs.some(event => event.event === 'agent_route_fallback'));
+});
+
+test('routing stays off by default even when route maps are present', async () => {
+  const harness = routingHarness(null);
+  const response = await requestFrom(harness.bridge, 'Tests fail. Fix.');
+  assert.equal(response.status, 200);
+  assert.deepEqual(harness.createdFor, ['agent-cheap-000001']);
+});

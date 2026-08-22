@@ -232,6 +232,25 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Cheap/strong agent routing (off by default)
+
+Create multiple named Hyperagent agents (for example `cheap-coder`, `debugger`, `planner`, `strong-coder`) and route turns deterministically instead of paying strong-model prices for every step:
+
+```json
+{
+  "enableAgentRouting": true,
+  "agentRoutes": {
+    "tool_selection": "hyperagent/cheap-coder",
+    "final_answer": "hyperagent/cheap-coder",
+    "debug_failure": "debugger",
+    "large_refactor": "strong-coder",
+    "planning": "planner"
+  }
+}
+```
+
+Route targets accept anything `resolveAgent` accepts (agent ID, exact name, or slug). Detection is deterministic (`debug_failure` → `large_refactor` → `planning` → `tool_selection` → `final_answer`) from the last user message plus forwarded tools. Unknown targets fall back to the requested model with an `agent_route_fallback` log, and selected routes plus reasons appear in the audit receipt. Off by default — no hidden model substitution unless you enable it.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

@@ -6,6 +6,7 @@ import {
   extractClientTools,
   modelInfo,
   parseRelayOutput,
+  pickAgentRoute,
   resolveAgent,
   slugify,
   sseEvents
@@ -147,3 +148,24 @@ test('Codex model metadata and SSE fixtures include required fields', () => {
   assert.equal(searchEvents[1].item.type, 'tool_search_call');
   assert.equal(searchEvents[1].item.execution, 'client');
 });
+
+test('route selection is deterministic with explicit precedence', () => {
+  const say = text => ({ input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }] });
+  const tools = [{ type: 'function', name: 'shell' }];
+  const config = {};
+  assert.deepEqual(pickAgentRoute(say('Tests fail with AssertionError, fix it.'), tools, config), { route: 'debug_failure', reason: 'failure indicators in request' });
+  assert.deepEqual(pickAgentRoute(say('Migrate the whole app to the new API.'), tools, config), { route: 'large_refactor', reason: 'refactor/migration request' });
+  assert.deepEqual(pickAgentRoute(say('Design the approach for the caching layer.'), [], config), { route: 'planning', reason: 'planning/design request' });
+  assert.deepEqual(pickAgentRoute(say('Inspect the auth module.'), tools, config), { route: 'tool_selection', reason: 'client tools are forwarded' });
+  assert.deepEqual(pickAgentRoute(say('Thanks, that wraps it up.'), [], config), { route: 'final_answer', reason: 'no local action indicated' });
+  const a = pickAgentRoute(say('Fix the failing test.'), tools, config);
+  const b = pickAgentRoute(say('Fix the failing test.'), tools, config);
+  assert.deepEqual(a, b);
+});
+
+const ROUTING_AGENTS = [
+  { id: 'agent-cheap', name: 'cheap-coder' },
+  { id: 'agent-strong', name: 'strong-coder' },
+  { id: 'agent-debugger', name: 'debugger' },
+  { id: 'agent-planner', name: 'planner' }
+];

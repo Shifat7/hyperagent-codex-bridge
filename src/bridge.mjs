@@ -23,6 +23,7 @@ import {
   modelInfo,
   nonStreamingResponse,
   parseRelayOutput,
+  pickAgentRoute,
   resolveAgent,
   responseIds,
   sseEvents
@@ -346,9 +347,30 @@ export class BridgeServer {
     }
     let tools;
     let prompt;
-    const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
+    let routeInfo = null;
     try {
       tools = extractClientTools(body, this.config);
+    } catch (error) {
+      if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
+      throw error;
+    }
+    if (this.config.enableAgentRouting === true && this.config.agentRoutes && typeof this.config.agentRoutes === 'object') {
+      const requestedRoute = pickAgentRoute(body, tools, this.config);
+      const routeTarget = this.config.agentRoutes[requestedRoute.route];
+      if (routeTarget && routeTarget !== body.model) {
+        try {
+          const routedAgent = resolveAgent(routeTarget, agents, this.config);
+          if (routedAgent.id !== agent.id) {
+            agent = routedAgent;
+            routeInfo = { ...requestedRoute, routeTarget: String(routeTarget) };
+          }
+        } catch {
+          await this.safeLog({ event: 'agent_route_fallback', requestId: serverRequestId, route: requestedRoute.route, routeTarget: String(routeTarget).slice(0, 80) });
+        }
+      }
+    }
+    const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
+    try {
       prompt = buildRelayPrompt(body, agent, this.config, tools);
     } catch (error) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
@@ -371,6 +393,7 @@ export class BridgeServer {
         streaming,
         promptChars: prompt.length,
         toolCount: tools.length,
+        ...(routeInfo ? { route: routeInfo.route, routeReason: routeInfo.reason, routeTarget: routeInfo.routeTarget } : {}),
         dailyUsed: reservation.used,
         dailyLimit: reservation.limit,
         reservationRef: privateRef(reservation.id, 'reservation')
