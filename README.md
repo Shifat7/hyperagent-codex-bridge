@@ -369,6 +369,28 @@ Create multiple named Hyperagent agents (for example `cheap-coder`, `debugger`, 
 
 Route targets accept anything `resolveAgent` accepts (agent ID, exact name, or slug). Detection is deterministic (`debug_failure` → `large_refactor` → `planning` → `tool_selection` → `final_answer`) from the last user message plus forwarded tools. Unknown targets fall back to the requested model with an `agent_route_fallback` log, and selected routes plus reasons appear in the audit receipt. Off by default — no hidden model substitution unless you enable it.
 
+### Per-task budgets
+
+Daily caps bound a whole day; runaway agent loops happen per task. Start an explicit task before a coding session and every dispatched request counts against it:
+
+```bash
+hacb task start fix-auth-bug
+hacb task status
+hacb task stop
+```
+
+When the cap is hit, the bridge fails closed — Codex sees `This local Hyperagent task budget is exhausted. Start a new task or raise maxRequestsPerTask.` and no further Hyperagent threads are created for that task. Task budgets are durable across restarts, separate from (and never bypass) the daily budget, and requests without an active task are unaffected.
+
+```json
+{
+  "maxRequestsPerTask": 8,
+  "maxPromptCharsPerTask": 180000,
+  "warnAtPromptCharsPerTask": 120000
+}
+```
+
+A warning is recorded in the audit log when cumulative prompt chars cross `warnAtPromptCharsPerTask`.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.
