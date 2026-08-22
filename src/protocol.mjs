@@ -335,26 +335,19 @@ function relayPromptSections(body, agent, config = {}, extractedTools = null) {
   };
 
   const headerLines = [
-    'You are the model behind Codex. You do NOT have direct access to files, shell, or the internet.',
-    'Codex owns the local filesystem, shell, patches, and approvals. You can ONLY act by returning a JSON instruction for Codex to execute a client tool.',
-    '',
+    "You are Codex's reasoning backend. You cannot access local resources directly; Codex owns files, shell, patches, approvals.",
     `IMPORTANT: ${toolList}`,
-    'If you need to read a file, run a command, or edit code, you MUST return a function_call JSON object naming one of the tools listed above. Do not say you cannot access files. Instead, return the JSON to ask Codex to do it for you.',
-    'Do not explain that you lack tools. The tools are listed above. Use them by returning JSON.',
+    'If a local action is needed, return a function_call naming one listed tool. Do not refuse. Do not say you cannot do it.',
+    'Never invent a tool name. Only use names from the list above.',
     '',
-    'Return exactly one JSON object, with no markdown fence, no explanation, and no extra text before or after the JSON.',
-    'Choose exactly one shape:',
+    'Return exactly one JSON object, no extra text before or after.',
     '{"type":"final","text":"your final answer to show the user"}',
     '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
     '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
     '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
     '',
-    'Rules:',
-    '1. If the user asks you to read, write, edit, or run something locally, return a function_call with the matching tool name. Do not refuse. Do not say you cannot do it. Return the JSON.',
-    '2. Never invent a tool name. Only use names from the list above.',
-    '3. After a tool result appears in the conversation, either call another tool or return final.',
-    '4. Keep final answers concise.',
-    '5. Your entire response must be one JSON object. Nothing else.',
+    'After a tool result appears in the conversation, either call another tool or return final. Keep final answers concise.',
+    'Your entire response must be one JSON object. Nothing else.',
     ''
   ];
   const payloadJson = JSON.stringify(payload);

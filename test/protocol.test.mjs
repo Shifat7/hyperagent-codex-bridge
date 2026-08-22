@@ -203,3 +203,24 @@ test('Codex model metadata and SSE fixtures include required fields', () => {
   assert.equal(searchEvents[1].item.type, 'tool_search_call');
   assert.equal(searchEvents[1].item.execution, 'client');
 });
+
+test('relay prompt is minimised without losing JSON-action reliability', () => {
+  const body = {
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+    tools: [{ type: 'function', name: 'shell', description: 'Run', parameters: { type: 'object' } }]
+  };
+  const prompt = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, {});
+  assert.ok(prompt.length < 1500, `expected a minimised prompt, got ${prompt.length} chars (legacy trivial baseline: 1978)`);
+  for (const phrase of [
+    'Available client tool names',
+    'Return exactly one JSON object',
+    '{"type":"final","text":"your final answer to show the user"}',
+    '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
+    '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
+    '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
+    'Never invent a tool name',
+    'Your entire response must be one JSON object'
+  ]) {
+    assert.ok(prompt.includes(phrase), `minimised prompt lost required phrase: ${phrase}`);
+  }
+});
