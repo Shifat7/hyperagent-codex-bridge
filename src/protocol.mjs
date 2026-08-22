@@ -173,12 +173,22 @@ function compact(value, limit) {
   return `${text.slice(0, limit)}\n[truncated by Hyperagent Codex Bridge]`;
 }
 
+export function retentionLimits(config = {}) {
+  const maxTurnChars = Math.max(1000, Number(config.maxTurnChars || 12000));
+  const maxConversationTurns = Math.max(2, Number(config.maxConversationTurns || 12));
+  const maxInputChars = Math.max(maxTurnChars, Number(config.maxInputChars || 48000));
+  const maxForwardedTools = Math.max(4, Number(config.maxForwardedTools || 64));
+  return { maxTurnChars, maxConversationTurns, maxInputChars, maxForwardedTools };
+}
+
+export function estimateTokens(chars) {
+  return Math.ceil(Math.max(0, Number(chars) || 0) / 4);
+}
+
 function normalizeInput(input, config = {}) {
-  if (typeof input === 'string') return [{ role: 'user', text: compact(input, 12000) }];
-  if (!Array.isArray(input)) return [{ role: 'user', text: compact(input, 12000) }];
-  const perTurnLimit = Math.max(1000, Number(config.maxTurnChars || 12000));
-  const maxTurns = Math.max(2, Number(config.maxConversationTurns || 12));
-  const maxTotal = Math.max(perTurnLimit, Number(config.maxInputChars || 48000));
+  if (typeof input === 'string') return [{ role: 'user', text: compact(input, retentionLimits(config).maxTurnChars) }];
+  if (!Array.isArray(input)) return [{ role: 'user', text: compact(input, retentionLimits(config).maxTurnChars) }];
+  const { maxTurnChars: perTurnLimit, maxConversationTurns: maxTurns, maxInputChars: maxTotal } = retentionLimits(config);
   const turns = [];
   for (const item of input) {
     const type = item?.type || 'message';
@@ -288,7 +298,7 @@ function normalizeTools(tools, config = {}) {
       add({ type: 'tool_search', name: 'tool_search', description: compact(tool.description || 'Search deferred client tools.', 800), execution: tool.execution || 'client' });
     }
   }
-  return normalized.slice(0, Math.max(4, Number(config.maxForwardedTools || 64)));
+  return normalized.slice(0, retentionLimits(config).maxForwardedTools);
 }
 
 export function extractClientTools(body, config = {}) {
@@ -302,7 +312,7 @@ export function extractClientTools(body, config = {}) {
   return normalizeTools(tools, config);
 }
 
-export function buildRelayPrompt(body, agent, config = {}, extractedTools = null) {
+function relayPromptSections(body, agent, config = {}, extractedTools = null) {
   const turns = normalizeInput(body.input, config);
   const tools = extractedTools || extractClientTools(body, config);
   const instructions = 'Act as the Codex reasoning backend. Use only the forwarded client tools and return one compact JSON action.';
@@ -324,7 +334,7 @@ export function buildRelayPrompt(body, agent, config = {}, extractedTools = null
     client_tools: tools
   };
 
-  return [
+  const headerLines = [
     'You are the model behind Codex. You do NOT have direct access to files, shell, or the internet.',
     'Codex owns the local filesystem, shell, patches, and approvals. You can ONLY act by returning a JSON instruction for Codex to execute a client tool.',
     '',
@@ -345,9 +355,56 @@ export function buildRelayPrompt(body, agent, config = {}, extractedTools = null
     '3. After a tool result appears in the conversation, either call another tool or return final.',
     '4. Keep final answers concise.',
     '5. Your entire response must be one JSON object. Nothing else.',
-    '',
-    JSON.stringify(payload)
-  ].join('\n');
+    ''
+  ];
+  const payloadJson = JSON.stringify(payload);
+  const headerText = headerLines.join('\n');
+  const prompt = [...headerLines, payloadJson].join('\n');
+  return { prompt, headerText, headerChars: headerText.length + 1, turns, tools, payloadJson };
+}
+
+export function buildRelayPrompt(body, agent, config = {}, extractedTools = null) {
+  return relayPromptSections(body, agent, config, extractedTools).prompt;
+}
+
+const TOOL_RESULT_ROLES = new Set(['tool_result', 'custom_tool_result', 'tool_search_result']);
+
+export function buildRelayPromptWithMetrics(body, agent, config = {}, extractedTools = null) {
+  const { prompt, headerText, headerChars, turns, tools, payloadJson } = relayPromptSections(body, agent, config, extractedTools);
+  const conversationChars = turns.reduce((sum, turn) => sum + turn.text.length, 0);
+  const toolResultChars = turns
+    .filter(turn => TOOL_RESULT_ROLES.has(turn.role))
+    .reduce((sum, turn) => sum + turn.text.length, 0);
+  const totalChars = prompt.length;
+  const breakdown = {
+    totalChars,
+    estimatedTokens: estimateTokens(totalChars),
+    estimator: 'ceil(chars / 4)',
+    usageSource: 'unavailable',
+    sections: {
+      relayInstructionChars: headerChars,
+      conversationChars,
+      toolResultChars,
+      toolSchemaChars: JSON.stringify(tools).length,
+      payloadChars: payloadJson.length
+    },
+    limits: retentionLimits(config),
+    retainedTurns: turns.length,
+    forwardedToolCount: tools.length
+  };
+  if (config.debugPromptExcerpts) {
+    const excerpt = value => String(value ?? '').slice(0, 240);
+    return {
+      prompt,
+      breakdown,
+      excerpts: {
+        relayInstructionsExcerpt: excerpt(headerText),
+        conversationExcerpt: excerpt(JSON.stringify(turns)),
+        toolSchemaExcerpt: excerpt(JSON.stringify(tools))
+      }
+    };
+  }
+  return { prompt, breakdown };
 }
 
 function parseJsonCandidate(text) {

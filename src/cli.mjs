@@ -28,6 +28,12 @@ import {
 } from './install.mjs';
 import { getAccessToken, invalidateTokens, login } from './oauth.mjs';
 import { buildAgentModels, slugify } from './protocol.mjs';
+import {
+  buildCostRecords,
+  loadAuditEntries,
+  loadPromptExcerpts,
+  summarizeCostRecords
+} from './cost-report.mjs';
 
 const command = process.argv[2] || 'help';
 const args = process.argv.slice(3);
@@ -48,6 +54,9 @@ Usage:
   hacb app-off               Restore normal App defaults; keep old bridge chats resumable
   hacb app-status            Show whether Codex App mode is active
   hacb audit [count]         Show recent sanitized bridge routing receipts
+  hacb audit --cost [count]  Show receipts with estimated prompt token breakdown
+  hacb cost-report [--last N]  Summarize recent dispatched requests (chars, ~tokens, tools)
+  hacb explain-prompt [--verbose]  Break down where the last relay prompt's characters went
   hacb budget                Show the local daily Hyperagent request cap
   hacb budget --safe         Restore the six-request safe default
   hacb budget --set <count>  Explicitly set a custom daily request cap (1-100)
@@ -178,6 +187,98 @@ async function runDoctor(config) {
   process.exitCode = failed ? 1 : 0;
 }
 
+function argFlagValue(args, flag) {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+function formatInt(value) {
+  return Number(value || 0).toLocaleString('en-US');
+}
+
+async function runCostReport(args) {
+  const lastRaw = argFlagValue(args, '--last');
+  const count = Math.min(500, Math.max(1, Number(lastRaw) || 20));
+  const records = buildCostRecords(await loadAuditEntries()).slice(-count);
+  if (!records.length) {
+    console.log('No dispatched bridge requests recorded yet.');
+    return;
+  }
+  console.log(`Last ${records.length} dispatched request${records.length === 1 ? '' : 's'} (local estimates; ceil(chars / 4)):\n`);
+  console.log(
+    'TIME'.padEnd(21),
+    'REQUEST'.padEnd(18),
+    'OUTCOME'.padEnd(15),
+    'PROMPT'.padStart(8),
+    '~TOKENS'.padStart(9),
+    'CONV'.padStart(8),
+    'SCHEMA'.padStart(8),
+    'RESULT'.padStart(8),
+    'TOOLS'.padStart(6),
+    'DAILY'.padStart(7)
+  );
+  for (const record of records) {
+    console.log(
+      String(record.timestamp || '').slice(0, 19).replace('T', ' ').padEnd(21),
+      record.requestId.replace(/^req_/, '').slice(0, 14).padEnd(18),
+      (record.outcome === 'completed' ? record.outputType || 'final' : record.outcome).slice(0, 14).padEnd(15),
+      formatInt(record.promptChars).padStart(8),
+      formatInt(record.estimatedPromptTokens).padStart(9),
+      formatInt(record.conversationChars).padStart(8),
+      formatInt(record.toolSchemaChars).padStart(8),
+      formatInt(record.toolResultChars).padStart(8),
+      formatInt(record.toolCount).padStart(6),
+      `${record.dailyUsed ?? '?'}/${record.dailyLimit ?? '?'}`.padStart(7)
+    );
+  }
+  const summary = summarizeCostRecords(records);
+  console.log('');
+  console.log(`Requests: ${summary.count} (${Object.entries(summary.byOutcome).map(([key, value]) => `${key}=${value}`).join(', ')})`);
+  console.log(`Estimated prompt tokens: total ${formatInt(summary.totalEstimatedTokens)}, avg ${formatInt(summary.avgEstimatedTokens)} per request`);
+  console.log(`Prompt chars: avg ${formatInt(summary.avgPromptChars)}, max ${formatInt(summary.maxPromptChars)}`);
+  console.log(`Forwarded tools: avg ${summary.avgToolCount}, max ${summary.maxToolCount}`);
+  console.log(`Output types: ${Object.entries(summary.byOutputType).map(([key, value]) => `${key}=${value}`).join(', ') || 'unknown'}`);
+  console.log('Estimates are local approximations only; Hyperagent does not report authoritative token usage.');
+}
+
+async function runExplainPrompt(args) {
+  const verbose = args.includes('--verbose') || args.includes('-v');
+  const records = buildCostRecords(await loadAuditEntries());
+  const record = records.at(-1);
+  if (!record) {
+    console.log('No dispatched bridge requests recorded yet.');
+    return;
+  }
+  console.log(`Last dispatched request: ${record.requestId}`);
+  console.log(`Timestamp: ${record.timestamp}`);
+  console.log(`Model: ${record.model ?? '(unknown)'}   Outcome: ${record.outcome}   Output: ${record.outputType ?? 'n/a'}`);
+  console.log('');
+  console.log('Relay prompt section breakdown (local estimate):');
+  console.log(`  relay instructions   ${formatInt(record.relayInstructionChars)} chars`);
+  console.log(`  conversation         ${formatInt(record.conversationChars)} chars (tool results inside: ${formatInt(record.toolResultChars)})`);
+  console.log(`  client tool schemas  ${formatInt(record.toolSchemaChars)} chars`);
+  console.log(`  payload JSON total   ${formatInt(record.payloadChars)} chars`);
+  console.log(`  prompt total         ${formatInt(record.promptChars)} chars ≈ ${formatInt(record.estimatedPromptTokens)} estimated tokens (ceil(chars / 4))`);
+  console.log('');
+  console.log(`Retention limits in effect: maxInputChars=${record.maxInputChars ?? '?'} maxTurnChars=${record.maxTurnChars ?? '?'} maxConversationTurns=${record.maxConversationTurns ?? '?'} maxForwardedTools=${record.maxForwardedTools ?? '?'}`);
+  console.log(`Retained turns: ${record.retainedTurns ?? '?'}   Forwarded tools: ${record.toolCount}   Daily budget at reservation: ${record.dailyUsed ?? '?'}/${record.dailyLimit ?? '?'}`);
+  if (!verbose) {
+    console.log('Run with --verbose to show captured prompt excerpts when debugPromptExcerpts is enabled.');
+    return;
+  }
+  const excerptEntries = await loadPromptExcerpts(record.requestId);
+  if (!excerptEntries.length) {
+    console.log('No excerpts captured for this request. Set "debugPromptExcerpts": true in config.json before dispatching.');
+    return;
+  }
+  console.log('');
+  for (const entry of excerptEntries.slice(-1)) {
+    if (entry.relayInstructionsExcerpt) console.log(`Relay instructions excerpt: ${entry.relayInstructionsExcerpt}`);
+    if (entry.conversationExcerpt) console.log(`Conversation excerpt: ${entry.conversationExcerpt}`);
+    if (entry.toolSchemaExcerpt) console.log(`Tool schema excerpt: ${entry.toolSchemaExcerpt}`);
+  }
+}
+
 async function main() {
   const config = await loadConfig();
   switch (command) {
@@ -262,7 +363,9 @@ async function main() {
       break;
     }
     case 'audit': {
-      const count = Math.min(100, Math.max(1, Number(args[0] || 12)));
+      const costMode = args.includes('--cost');
+      const countArg = args.find(value => /^\d+$/.test(value));
+      const count = Math.min(100, Math.max(1, Number(countArg || 12)));
       let text = '';
       try {
         text = await readFile(auditPath(), 'utf8');
@@ -276,6 +379,12 @@ async function main() {
       }
       for (const line of entries) {
         const item = JSON.parse(line);
+        const costParts = !costMode || item.event !== 'request_reserved' ? [] : [
+          item.estimatedPromptTokens != null ? `~tokens=${item.estimatedPromptTokens}` : '',
+          item.conversationChars != null ? `conv=${item.conversationChars}` : '',
+          item.toolSchemaChars != null ? `schema=${item.toolSchemaChars}` : '',
+          item.toolResultChars != null ? `result=${item.toolResultChars}` : ''
+        ];
         console.log([
           item.at,
           item.event,
@@ -286,12 +395,20 @@ async function main() {
           item.reservationRef || '',
           item.outputType || '',
           item.promptChars ? `promptChars=${item.promptChars}` : '',
+          ...costParts,
           item.dailyUsed ? `daily=${item.dailyUsed}/${item.dailyLimit}` : '',
           item.errorCode || ''
         ].filter(Boolean).join('  '));
       }
+      if (costMode) console.log('Token figures are local estimates (ceil(chars / 4)), not authoritative usage.');
       break;
     }
+    case 'cost-report':
+      await runCostReport(args);
+      break;
+    case 'explain-prompt':
+      await runExplainPrompt(args);
+      break;
     case 'budget': {
       if (args[0] === '--safe') {
         config.maxRequestsPerDay = SAFE_MAX_REQUESTS_PER_DAY;

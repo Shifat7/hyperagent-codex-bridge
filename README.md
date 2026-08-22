@@ -228,6 +228,18 @@ hacb audit 12
 
 A Codex tool loop consumes at least two Hyperagent requests. Raising `maxRequestsPerDay`, input limits, or reasoning effort is an explicit operator decision, not an automatic behavior.
 
+### Cost observability
+
+Every dispatched request records a local prompt-size estimate in the audit log: total chars, estimated tokens (`ceil(chars / 4)` — an approximation, not authoritative usage), and a section breakdown (relay instructions, conversation, tool results inside the conversation, client tool schemas). Retention limits and forwarded tool counts are recorded alongside.
+
+```bash
+hacb cost-report --last 20   # per-request table plus totals/averages
+hacb explain-prompt          # where the last relay prompt's characters went
+hacb audit --cost 20         # receipts with estimated token columns
+```
+
+Reports contain counts and section sizes only — never prompt text. To inspect bounded local excerpts of what was actually sent, set `"debugPromptExcerpts": true` in `~/.hyperagent-codex-bridge/config.json` before dispatching; excerpts are then written to the private state directory with mode `0600`, and `hacb explain-prompt --verbose` shows them for the matching request. Leave this off unless debugging; it stores fragments of your prompts locally.
+
 Budget state is reserved durably before provider dispatch, committed immediately before a `create_thread` attempt, and released only when the request is known not to have been dispatched. A disconnect after dispatch remains committed because the documented Hyperagent MCP surface cannot prove that the remote attempt stopped.
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
