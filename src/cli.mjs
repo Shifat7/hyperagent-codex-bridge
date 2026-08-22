@@ -21,6 +21,7 @@ import {
   bridgeUrl
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
+import { OpenRouterClient } from './openrouter.mjs';
 import {
   codexProfilePath,
   generateCatalog,
@@ -81,6 +82,14 @@ The bridge binds only to 127.0.0.1. Revoke OAuth access anytime at:
 }
 
 async function listAgents(config) {
+  if (config.upstream === 'openrouter') {
+    const client = new OpenRouterClient(config);
+    try {
+      return await client.listAgents();
+    } finally {
+      await client.close();
+    }
+  }
   const client = new HyperagentClient(config);
   try {
     return await client.listAgents();

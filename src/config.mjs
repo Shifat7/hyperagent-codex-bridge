@@ -150,7 +150,10 @@ debugPromptExcerpts: false,
   enableLocalPreprocessor: false,
   localPreprocessorCommand: null,
   localPreprocessorTimeoutMs: 3000,
-  localPreprocessorFailureMode: 'fallback'
+  localPreprocessorFailureMode: 'fallback',
+  upstream: 'hyperagent',
+  openrouterBaseUrl: 'https://openrouter.ai/api/v1',
+  openrouterModel: 'openai/gpt-4o-mini'
 });
 
 export async function ensureStateDir() {

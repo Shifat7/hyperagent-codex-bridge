@@ -420,6 +420,19 @@ An optional local command can inspect sanitised request metadata before anything
 
 The preprocessor can classify, estimate cost, or reject — it never writes code or replaces Hyperagent reasoning. Timeouts are enforced by killing the process; failures either fall back to allowing the request (`fallback`) or fail closed with HTTP 503 (`fail_closed`). Rejections return HTTP 400 with a generic message; reasons stay in local logs.
 
+## Testing end-to-end against OpenRouter
+
+Before wiring the bridge to a Hyperagent agent you can exercise the full local pipeline — Codex CLI → bridge → relay protocol → model — with any OpenRouter model:
+
+```json
+{
+  "upstream": "openrouter",
+  "openrouterModel": "openai/gpt-4o-mini"
+}
+```
+
+Export `OPENROUTER_API_KEY` (or set `openrouterApiKey` in the config file; the environment variable is preferred so the key never touches disk). The bridge exposes one synthetic agent (`hyperagent/openrouter`) backed by `openrouterModel`; point your profile's `model` at that slug, or map friendlier names through `aliases`. Everything else is unchanged: the same minimised relay prompt goes out, the model must answer with the same compact JSON actions, and cost metrics, tool shortlisting, reducer, checkpoints, task budgets, caching, and routing all apply exactly as they do against Hyperagent. Switch back by removing `upstream` (defaults to `"hyperagent"`). Requests fail closed with HTTP 503 (`upstream_not_configured`) when the key is missing.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

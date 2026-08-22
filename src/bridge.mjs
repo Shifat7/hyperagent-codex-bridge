@@ -21,6 +21,7 @@ import {
   VERSION
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
+import { OpenRouterClient } from './openrouter.mjs';
 import { loadCheckpoint } from './checkpoint.mjs';
 import { runLocalPreprocessor } from './preprocessor.mjs';
 import {
@@ -58,6 +59,8 @@ const PUBLIC_ERRORS = Object.freeze({
   invalid_request: 'The request is invalid.',
   model_required: 'The model field is required.',
   preprocessor_failed: 'The local preprocessor failed closed.',
+  upstream_not_configured: 'The selected upstream is not configured. Set OPENROUTER_API_KEY or switch back to the Hyperagent upstream.',
+  upstream_error: 'The model upstream returned an error.',
   preprocessor_rejected: 'The request was rejected by the local preprocessor.',
   prompt_too_large: 'The sanitized relay prompt is too large.',
   request_too_large: 'The request body is too large.',
@@ -189,12 +192,22 @@ function etagFor(value) {
   return `"${createHash('sha256').update(JSON.stringify(value)).digest('base64url').slice(0, 24)}"`;
 }
 
+export function createUpstreamClient(config) {
+  if (config.upstream === 'openrouter') return new OpenRouterClient(config);
+  if (config.upstream === undefined || config.upstream === null || config.upstream === '' || config.upstream === 'hyperagent') {
+    return new HyperagentClient(config);
+  }
+  throw Object.assign(new Error(`Unsupported upstream "${config.upstream}". Use "hyperagent" or "openrouter".`), {
+    status: 400, code: 'upstream_not_configured'
+  });
+}
+
 export class BridgeServer {
   constructor(config, { clientFactory, auditWriter, logWriter, excerptWriter, checkpointLoader, cacheManager, preprocessor, budgetGuard, budgetManager, idempotencyManager } = {}) {
     this.config = config;
     this.server = null;
     this.agentCache = { at: 0, agents: [] };
-    this.clientFactory = clientFactory || (() => new HyperagentClient(this.config));
+    this.clientFactory = clientFactory || (() => createUpstreamClient(this.config));
     this.auditWriter = auditWriter || appendAudit;
     this.logWriter = logWriter || appendGatewayLog;
     this.excerptWriter = config.debugPromptExcerpts
