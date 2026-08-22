@@ -146,7 +146,11 @@ debugPromptExcerpts: false,
   warnAtPromptCharsPerTask: 120000,
   enableResponseCache: false,
   responseCacheTtlMs: 30 * 60 * 1000,
-  responseCacheMaxEntries: 128
+  responseCacheMaxEntries: 128,
+  enableLocalPreprocessor: false,
+  localPreprocessorCommand: null,
+  localPreprocessorTimeoutMs: 3000,
+  localPreprocessorFailureMode: 'fallback'
 });
 
 export async function ensureStateDir() {

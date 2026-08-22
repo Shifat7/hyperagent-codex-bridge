@@ -1010,3 +1010,81 @@ test('failed dispatches are never cached and an explicit Idempotency-Key still w
     else process.env.HACB_HOME = previous;
   }
 });
+
+test('local preprocessor rejects, falls back, and fails closed per config', async () => {
+  const baseConfig = {
+    bridgeHost: '127.0.0.1', bridgePort: 0, aliases: {}, exposeAllAgents: true,
+    localApiToken: 'test-local-token-12345678901234567890'
+  };
+  const factory = {
+    async listAgents() { return [agent]; },
+    async createThread() { throw new Error('must never dispatch'); },
+    async close() {}
+  };
+  const options = extras => ({
+    clientFactory: () => ({ ...factory }),
+    auditWriter: async () => {}, logWriter: async () => {},
+    idempotencyManager: createMemoryIdempotencyManager(),
+    budgetGuard: async () => ({ used: 0, committed: 0, reserved: 0, limit: 6, remaining: 6 }),
+    ...extras
+  });
+
+  const rejecting = new BridgeServer(baseConfig, options({
+    preprocessor: async payload => {
+      assert.doesNotMatch(JSON.stringify(payload), /private-prompt-marker/);
+      return { action: 'reject', reason: 'no-op request' };
+    }
+  }));
+  await rejecting.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${rejecting.server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'private-prompt-marker', stream: false })
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'preprocessor_rejected');
+  } finally {
+    await rejecting.close();
+  }
+
+  let called = false;
+  const inactive = new BridgeServer(baseConfig, options({
+    clientFactory: () => ({
+      async listAgents() { return [agent]; },
+      async createThread() { return 'thread_preprocessor_pass'; },
+      async waitForThread() { return { text: '{"type":"final","text":"ok"}' }; },
+      async close() {}
+    }),
+    preprocessor: async () => { called = true; return { action: 'allow' }; }
+  }));
+  await inactive.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${inactive.server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'normal', stream: false })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(called, true);
+  } finally {
+    await inactive.close();
+  }
+
+  const strict = new BridgeServer(
+    { ...baseConfig, enableLocalPreprocessor: true, localPreprocessorFailureMode: 'fail_closed' },
+    options({ preprocessor: async () => { throw Object.assign(new Error('boom'), { code: 'preprocessor_failed' }); } })
+  );
+  await strict.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${strict.server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'hyperagent/sol-coder', input: 'strict', stream: false })
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'preprocessor_failed');
+  } finally {
+    await strict.close();
+  }
+});
