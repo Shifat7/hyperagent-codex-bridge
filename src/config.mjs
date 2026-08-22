@@ -104,7 +104,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxForwardedTools: 32,
   maxPromptChars: 70000,
   blockMultiAgentTools: true,
-  debugPromptExcerpts: false,
+debugPromptExcerpts: false,
   enableSmartToolSelection: true,
   forwardFullToolSchemas: false,
   maxToolDescriptionChars: 160,
@@ -122,8 +122,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   ],
   maxCheckpointChars: 4000,
   enableMultiToolCalls: false,
-  maxToolCallsPerResponse: 3});
-
+  maxToolCallsPerResponse: 3,
+  enableAgentRouting: false,
+  agentRoutes: {}
+});
 export async function ensureStateDir() {
   await mkdir(stateDir(), { recursive: true, mode: 0o700 });
   await chmod(stateDir(), 0o700).catch(() => {});

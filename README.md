@@ -350,6 +350,25 @@ When enabled, the relay may request up to `maxToolCallsPerResponse` independent 
 
 Fails safely: any unavailable tool name, or more than the maximum calls, degrades to a plain final answer naming the problem — never a partial execution. Disabled by default until proven stable across Codex builds.
 
+### Cheap/strong agent routing (off by default)
+
+Create multiple named Hyperagent agents (for example `cheap-coder`, `debugger`, `planner`, `strong-coder`) and route turns deterministically instead of paying strong-model prices for every step:
+
+```json
+{
+  "enableAgentRouting": true,
+  "agentRoutes": {
+    "tool_selection": "hyperagent/cheap-coder",
+    "final_answer": "hyperagent/cheap-coder",
+    "debug_failure": "debugger",
+    "large_refactor": "strong-coder",
+    "planning": "planner"
+  }
+}
+```
+
+Route targets accept anything `resolveAgent` accepts (agent ID, exact name, or slug). Detection is deterministic (`debug_failure` → `large_refactor` → `planning` → `tool_selection` → `final_answer`) from the last user message plus forwarded tools. Unknown targets fall back to the requested model with an `agent_route_fallback` log, and selected routes plus reasons appear in the audit receipt. Off by default — no hidden model substitution unless you enable it.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.

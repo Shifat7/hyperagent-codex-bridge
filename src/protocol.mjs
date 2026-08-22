@@ -599,8 +599,24 @@ export function buildRelayPromptWithMetrics(body, agent, config = {}, extractedT
   return { prompt, breakdown };
 }
 
-function parseJsonCandidate(text) {
-  const trimmed = String(text || '').trim();
+const ROUTE_DEBUG_PATTERN = /\b(fix|debug|failing|failed|fails|failure|broken|crash(?:es|ed)?|stack ?trace|traceback|exception|error TS\d+|assertionerror)\b/;
+const ROUTE_REFACTOR_PATTERN = /\b(refactor|restructure|rewrite|migrate|migration|overhaul)\b/;
+const ROUTE_PLAN_PATTERN = /\b(plan|planning|design|architect(?:ure)?|approach|strategy|roadmap|proposal)\b/;
+
+export function pickAgentRoute(body, tools, config = {}) {
+  const items = Array.isArray(body?.input) ? body.input : [];
+  const lastUser = [...items].reverse().find(item => item?.type === 'message' && item.role === 'user');
+  const text = contentToText(lastUser?.content ?? (typeof body?.input === 'string' ? body.input : '')).toLowerCase();
+  if (text) {
+    if (ROUTE_DEBUG_PATTERN.test(text)) return { route: 'debug_failure', reason: 'failure indicators in request' };
+    if (ROUTE_REFACTOR_PATTERN.test(text)) return { route: 'large_refactor', reason: 'refactor/migration request' };
+    if (ROUTE_PLAN_PATTERN.test(text)) return { route: 'planning', reason: 'planning/design request' };
+  }
+  if ((Array.isArray(tools) ? tools.length : 0) > 0) return { route: 'tool_selection', reason: 'client tools are forwarded' };
+  return { route: 'final_answer', reason: 'no local action indicated' };
+}
+
+function parseJsonCandidate(text) {  const trimmed = String(text || '').trim();
   const unfenced = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
     return JSON.parse(unfenced);

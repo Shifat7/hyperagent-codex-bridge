@@ -25,6 +25,7 @@ import {
   modelInfo,
   nonStreamingResponse,
   parseRelayOutput,
+  pickAgentRoute,
   resolveAgent,
   responseIds,
   sseEvents
@@ -354,11 +355,32 @@ export class BridgeServer {
     }
     let tools;
     let prompt;
+    let routeInfo = null;
     let breakdown;
     let excerpts;
-    const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
     try {
       tools = extractClientTools(body, this.config);
+    } catch (error) {
+      if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
+      throw error;
+    }
+    if (this.config.enableAgentRouting === true && this.config.agentRoutes && typeof this.config.agentRoutes === 'object') {
+      const requestedRoute = pickAgentRoute(body, tools, this.config);
+      const routeTarget = this.config.agentRoutes[requestedRoute.route];
+      if (routeTarget && routeTarget !== body.model) {
+        try {
+          const routedAgent = resolveAgent(routeTarget, agents, this.config);
+          if (routedAgent.id !== agent.id) {
+            agent = routedAgent;
+            routeInfo = { ...requestedRoute, routeTarget: String(routeTarget) };
+          }
+        } catch {
+          await this.safeLog({ event: 'agent_route_fallback', requestId: serverRequestId, route: requestedRoute.route, routeTarget: String(routeTarget).slice(0, 80) });
+        }
+      }
+    }
+    const auditModel = body.model === agent.id ? privateRef(agent.id, 'agent') : body.model;
+    try {
       const checkpoint = this.checkpointLoader ? await this.checkpointLoader(this.config) : null;
       ({ prompt, breakdown, excerpts } = buildRelayPromptWithMetrics(body, agent, this.config, tools, checkpoint?.text || null));
     } catch (error) {
@@ -405,6 +427,7 @@ export class BridgeServer {
         promptChars: prompt.length,
         toolCount: tools.length,
         ...costMetrics,
+        ...(routeInfo ? { route: routeInfo.route, routeReason: routeInfo.reason, routeTarget: routeInfo.routeTarget } : {}),
         dailyUsed: reservation.used ?? null,
         dailyLimit: reservation.limit ?? null,
         reservationRef: privateRef(reservation.id, 'reservation')
