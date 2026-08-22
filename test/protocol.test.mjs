@@ -4,6 +4,7 @@ import {
   buildAgentModels,
   buildRelayPrompt,
   buildRelayPromptWithMetrics,
+  classifyTurn,
   estimateTokens,
   extractClientTools,
   modelInfo,
@@ -223,4 +224,95 @@ test('relay prompt is minimised without losing JSON-action reliability', () => {
   ]) {
     assert.ok(prompt.includes(phrase), `minimised prompt lost required phrase: ${phrase}`);
   }
+});
+
+test('turn classification recognises common coding task types', () => {
+  const userSay = text => [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }];
+  assert.equal(classifyTurn(userSay('What is the capital of France?')), 'final_answer_only');
+  assert.equal(classifyTurn(userSay('Inspect the repo structure and list the entry points.')), 'read_or_search');
+  assert.equal(classifyTurn(userSay('Refactor the auth module to use the new session API.')), 'edit_code');
+  assert.equal(classifyTurn(userSay('Run the test suite now.')), 'run_command');
+  assert.equal(classifyTurn(userSay('The build fails with AssertionError: expected 4 to be 2. Fix it.')), 'debug_failure');
+  assert.equal(classifyTurn(userSay('Please proceed with that approach.')), 'unknown');
+});
+
+test('classification never drops tools once a conversation has used them', () => {
+  const input = [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What should we do next?' }] },
+    { type: 'function_call_output', call_id: 'call_1', output: 'some result' }
+  ];
+  assert.notEqual(classifyTurn(input), 'final_answer_only');
+});
+
+const TOOLBOX = [
+  { type: 'function', name: 'shell', description: 'Runs a shell command.', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+  { type: 'function', name: 'read_file', description: 'Reads a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+  { type: 'function', name: 'grep_search', description: 'Searches file contents.', parameters: { type: 'object' } },
+  { type: 'function', name: 'apply_patch', description: 'Applies a patch.', parameters: { type: 'object' } },
+  { type: 'function', name: 'write_file', description: 'Writes a file.', parameters: { type: 'object' } }
+];
+
+function bodyWith(text, extra = {}) {
+  return { model: 'hyperagent/sol-coder', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }], tools: TOOLBOX, ...extra };
+}
+
+test('smart selection forwards fewer tools for inspection and run tasks', () => {
+  const config = { enableSmartToolSelection: true, maxForwardedTools: 32 };
+  const inspect = extractClientTools(bodyWith('Inspect how this project wires up its entry point.'), config);
+  assert.ok(inspect.length < TOOLBOX.length);
+  assert.ok(inspect.some(tool => tool.name === 'read_file'));
+  assert.ok(inspect.every(tool => !['write_file'].includes(tool.name)));
+  const run = extractClientTools(bodyWith('Run the test suite.'), config);
+  assert.deepEqual(run.map(tool => tool.name), ['shell']);
+});
+
+test('smart selection preserves edit and debug toolchains', () => {
+  const config = { enableSmartToolSelection: true, maxForwardedTools: 32 };
+  for (const text of ['Edit src/index.ts to add the export.', 'Tests fail with AssertionError. Fix the bug in parse().']) {
+    const tools = extractClientTools(bodyWith(text), config);
+    assert.ok(tools.some(tool => tool.name === 'apply_patch'), `missing patch tool for: ${text}`);
+    assert.ok(tools.some(tool => tool.name === 'read_file'), `missing read tool for: ${text}`);
+    assert.ok(tools.some(tool => tool.name === 'shell'), `missing shell for: ${text}`);
+  }
+});
+
+test('plain questions forward no tools while mid-task conversations keep theirs', () => {
+  const config = { enableSmartToolSelection: true, maxForwardedTools: 32 };
+  assert.deepEqual(extractClientTools(bodyWith('What is the capital of France?'), config), []);
+  const midTask = extractClientTools({
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What should we try next?' }] },
+      { type: 'function_call_output', call_id: 'call_1', output: 'result' }
+    ],
+    tools: TOOLBOX
+  }, config);
+  assert.equal(midTask.length, TOOLBOX.length);
+});
+
+test('disabling smart selection or unknown turns preserve every forwarded tool name', () => {
+  const off = extractClientTools(bodyWith('Inspect the repo.'), { enableSmartToolSelection: false, maxForwardedTools: 32 });
+  assert.deepEqual(off.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
+  const unknown = extractClientTools(bodyWith('Please proceed.'), { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.deepEqual(unknown.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
+  for (const forwarded of [off, unknown]) {
+    for (const tool of forwarded) {
+      assert.ok(TOOLBOX.some(original => original.name === tool.name && original.type === tool.type));
+    }
+  }
+});
+
+test('schema minimisation keeps names and argument shapes but trims descriptions', () => {
+  const config = { enableSmartToolSelection: true, forwardFullToolSchemas: false, maxToolDescriptionChars: 20 };
+  const [shell] = extractClientTools(bodyWith('Run the tests.'), config);
+  assert.equal(shell.name, 'shell');
+  assert.equal(shell.description.length <= 20, true);
+  assert.deepEqual(shell.parameters.required, ['command']);
+  assert.equal(shell.parameters.properties.command.type, 'string');
+  assert.equal(shell.parameters.properties.command.description, undefined);
+
+  const full = extractClientTools(bodyWith('Run the tests.', {
+    tools: [{ ...TOOLBOX[0], description: 'x'.repeat(400), parameters: { type: 'object', properties: { command: { type: 'string', description: 'full' } }, required: ['command'] } }]
+  }), { enableSmartToolSelection: true, forwardFullToolSchemas: true, maxForwardedTools: 32 });
+  assert.equal(full[0].description.length, 400);
+  assert.equal(full[0].parameters.properties.command.description, 'full');
 });

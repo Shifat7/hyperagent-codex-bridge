@@ -301,6 +301,106 @@ function normalizeTools(tools, config = {}) {
   return normalized.slice(0, retentionLimits(config).maxForwardedTools);
 }
 
+export const TURN_TASK_TYPES = Object.freeze([
+  'final_answer_only',
+  'read_or_search',
+  'edit_code',
+  'run_command',
+  'debug_failure',
+  'unknown'
+]);
+
+const TOOL_USE_TYPES = new Set([
+  'function_call',
+  'function_call_output',
+  'custom_tool_call',
+  'custom_tool_call_output',
+  'tool_search_call',
+  'tool_search_output'
+]);
+
+const DEBUG_PATTERN = /\b(fix|debug|failing|failed|fails|failure|broken|crash(?:es|ed)?|stack ?trace|traceback|exception|error TS\d+|assertionerror)\b/;
+const EDIT_PATTERN = /\b(edit|change|modify|refactor|implement|add|remove|delete|rename|move|rewrit|update|write|creat|patch)\w*\b/;
+const RUN_PATTERN = /\b(run|execute|invoke|launch|install|build|serve|compile|lint)\b|\btests?\b/;
+const INSPECT_PATTERN = /\b(inspect|explore|review|analy[sz]e|read|open|view|show|list|find|search|grep|look)\b/;
+const QUESTION_START = /^\s*(what|why|when|who|whom|whose|which|should i|can you explain|tell me|explain|describe)\b/;
+const LOCAL_NOUNS = /\b(repo|repository|codebase|file|files|folder|director(?:y|ies)|code|function|class|method|module|package|script|command|line|bug|test|tests|build|branch|commit|workspace)\b/;
+
+export function classifyTurn(input) {
+  const items = Array.isArray(input) ? input : [];
+  const sawToolUse = items.some(item => TOOL_USE_TYPES.has(item?.type));
+  const lastUser = [...items].reverse().find(item => item?.type === 'message' && item.role === 'user');
+  const text = contentToText(lastUser?.content ?? (typeof input === 'string' ? input : '')).toLowerCase();
+  if (!text.trim()) return 'unknown';
+  if (DEBUG_PATTERN.test(text)) return 'debug_failure';
+  if (EDIT_PATTERN.test(text)) return 'edit_code';
+  if (RUN_PATTERN.test(text)) return 'run_command';
+  if (INSPECT_PATTERN.test(text) || /\bwhere (is|are|do|does|can)\b/.test(text)) return 'read_or_search';
+  const isQuestion = text.includes('?') || QUESTION_START.test(text);
+  if (isQuestion && !LOCAL_NOUNS.test(text) && !sawToolUse && text.length <= 200) return 'final_answer_only';
+  return 'unknown';
+}
+
+const TASK_TOOL_CATEGORIES = Object.freeze({
+  read_or_search: ['read', 'shell', 'tool_search'],
+  run_command: ['shell', 'tool_search'],
+  edit_code: ['edit', 'read', 'shell', 'tool_search'],
+  debug_failure: ['edit', 'read', 'shell', 'tool_search']
+});
+
+function toolCategory(tool) {
+  if (tool?.type === 'tool_search') return 'tool_search';
+  if (tool?.type === 'custom') return 'edit';
+  const tokens = String(tool?.name || '').split(/[^a-zA-Z0-9]+/).filter(Boolean).map(token => token.toLowerCase());
+  const has = words => tokens.some(token => words.includes(token));
+  if (has(['read', 'cat', 'view', 'open', 'ls', 'glob', 'grep', 'search', 'find', 'list', 'inspect', 'fetch', 'query', 'look'])) return 'read';
+  if (has(['edit', 'write', 'patch', 'apply', 'create', 'insert', 'replace', 'update', 'delete', 'remove', 'rename', 'move', 'save'])) return 'edit';
+  if (has(['shell', 'exec', 'execute', 'bash', 'zsh', 'sh', 'terminal', 'command', 'cmd', 'run'])) return 'shell';
+  return 'other';
+}
+
+function minimiseParameters(parameters) {
+  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters) || parameters.type !== 'object') {
+    return parameters;
+  }
+  const properties = {};
+  for (const [key, value] of Object.entries(parameters.properties || {})) {
+    properties[key] = value && typeof value === 'object' && !Array.isArray(value) && value.type
+      ? { type: value.type }
+      : {};
+  }
+  return {
+    type: 'object',
+    ...(Array.isArray(parameters.required) && parameters.required.length ? { required: [...parameters.required] } : {}),
+    properties
+  };
+}
+
+function minimiseToolSchemas(tools, config) {
+  if (config.forwardFullToolSchemas) return tools;
+  const maxDescriptionChars = Math.max(0, Number(config.maxToolDescriptionChars ?? 160));
+  return tools.map(tool => {
+    if (tool.type !== 'function') return tool;
+    return {
+      ...tool,
+      description: String(tool.description || '').slice(0, maxDescriptionChars),
+      parameters: minimiseParameters(tool.parameters)
+    };
+  });
+}
+
+export function shortlistTools(tools, taskType, config = {}) {
+  if (taskType === 'final_answer_only') return [];
+  const categories = TASK_TOOL_CATEGORIES[taskType];
+  let selected = Array.isArray(tools) ? tools : [];
+  if (categories) {
+    const matched = selected.filter(tool => categories.includes(toolCategory(tool)));
+    if (matched.length) selected = matched;
+  }
+  const capped = selected.slice(0, Math.max(4, Number(config.maxForwardedTools || 64)));
+  return minimiseToolSchemas(capped, config);
+}
+
 export function extractClientTools(body, config = {}) {
   const tools = Array.isArray(body?.tools) ? [...body.tools] : [];
   if (Array.isArray(body?.input)) {
@@ -309,7 +409,9 @@ export function extractClientTools(body, config = {}) {
       if (item?.type === 'tool_search_output' && Array.isArray(item.tools)) tools.push(...item.tools);
     }
   }
-  return normalizeTools(tools, config);
+  const normalized = normalizeTools(tools, config);
+  if (!config.enableSmartToolSelection) return normalized;
+  return shortlistTools(normalized, classifyTurn(body?.input), config);
 }
 
 function relayPromptSections(body, agent, config = {}, extractedTools = null) {

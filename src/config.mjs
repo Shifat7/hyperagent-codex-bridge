@@ -104,7 +104,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxForwardedTools: 32,
   maxPromptChars: 70000,
   blockMultiAgentTools: true,
-  debugPromptExcerpts: false
+  debugPromptExcerpts: false,
+  enableSmartToolSelection: true,
+  forwardFullToolSchemas: false,
+  maxToolDescriptionChars: 160
 });
 
 export async function ensureStateDir() {
