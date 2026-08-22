@@ -99,7 +99,11 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxConversationTurns: 8,
   maxForwardedTools: 32,
   maxPromptChars: 70000,
-  blockMultiAgentTools: true
+  blockMultiAgentTools: true,
+  enableLocalPreprocessor: false,
+  localPreprocessorCommand: null,
+  localPreprocessorTimeoutMs: 3000,
+  localPreprocessorFailureMode: 'fallback'
 });
 
 export async function ensureStateDir() {

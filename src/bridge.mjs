@@ -16,6 +16,7 @@ import {
   VERSION
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
+import { runLocalPreprocessor } from './preprocessor.mjs';
 import {
   buildAgentModels,
   buildRelayPrompt,
@@ -48,6 +49,8 @@ const PUBLIC_ERRORS = Object.freeze({
   invalid_model_alias: 'A configured model alias is invalid or unavailable.',
   invalid_request: 'The request is invalid.',
   model_required: 'The model field is required.',
+  preprocessor_failed: 'The local preprocessor failed closed.',
+  preprocessor_rejected: 'The request was rejected by the local preprocessor.',
   prompt_too_large: 'The sanitized relay prompt is too large.',
   request_too_large: 'The request body is too large.',
   upstream_timeout: 'The upstream request timed out before a safe result was available.',
@@ -179,13 +182,17 @@ function etagFor(value) {
 }
 
 export class BridgeServer {
-  constructor(config, { clientFactory, auditWriter, logWriter, budgetGuard, budgetManager, idempotencyManager } = {}) {
+  constructor(config, { clientFactory, auditWriter, logWriter, preprocessor, budgetGuard, budgetManager, idempotencyManager } = {}) {
     this.config = config;
     this.server = null;
     this.agentCache = { at: 0, agents: [] };
     this.clientFactory = clientFactory || (() => new HyperagentClient(this.config));
     this.auditWriter = auditWriter || appendAudit;
     this.logWriter = logWriter || appendGatewayLog;
+    this.preprocessor = preprocessor
+      || ((config.enableLocalPreprocessor === true && config.localPreprocessorCommand)
+        ? payload => runLocalPreprocessor(config, payload)
+        : null);
     this.budgetManager = budgetManager || (budgetGuard
       ? {
           reserve: async configValue => ({ id: null, ...await budgetGuard(configValue) }),
@@ -287,6 +294,23 @@ export class BridgeServer {
   async handleResponses(request, response, serverRequestId) {
     const body = await readJson(request);
     if (!body.model) throw Object.assign(new Error('The model field is required.'), { status: 400, code: 'model_required' });
+    if (this.preprocessor) {
+      let decision;
+      try {
+        decision = await this.preprocessor({
+          requestId: serverRequestId,
+          model: body.model,
+          toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+          inputChars: JSON.stringify(body.input ?? '').length
+        });
+      } catch (error) {
+        throw Object.assign(error, { status: error.status || 503, code: error.code || 'preprocessor_failed' });
+      }
+      if (decision?.action === 'reject') {
+        await this.safeLog({ event: 'preprocessor_rejected', requestId: serverRequestId, reason: String(decision.reason || '').slice(0, 120) });
+        throw Object.assign(new Error('Rejected by the local preprocessor.'), { status: 400, code: 'preprocessor_rejected' });
+      }
+    }
     const keyHash = idempotencyKey(request);
     const fingerprint = requestFingerprint(body);
     const abort = new AbortController();

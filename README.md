@@ -232,6 +232,21 @@ Budget state is reserved durably before provider dispatch, committed immediately
 
 These controls do not replace the Hyperagent agent-level budget. Configure each relay agent with low effort and a hard per-run USD cap before production use.
 
+### Local preprocessor hook (off by default)
+
+An optional local command can inspect sanitised request metadata before anything reaches Hyperagent. It receives JSON on stdin (`requestId`, `model`, `toolCount`, `inputChars` — never prompt content) and may answer `{"action":"reject","reason":"..."}` to block no-op requests locally.
+
+```json
+{
+  "enableLocalPreprocessor": true,
+  "localPreprocessorCommand": "/usr/local/bin/hacb-guard",
+  "localPreprocessorTimeoutMs": 3000,
+  "localPreprocessorFailureMode": "fallback"
+}
+```
+
+The preprocessor can classify, estimate cost, or reject — it never writes code or replaces Hyperagent reasoning. Timeouts are enforced by killing the process; failures either fall back to allowing the request (`fallback`) or fail closed with HTTP 503 (`fail_closed`). Rejections return HTTP 400 with a generic message; reasons stay in local logs.
+
 ## Security
 
 - The HTTP bridge binds only to `127.0.0.1` and requires a random local bearer token on every model and Responses request.
