@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
+const OPENROUTER_SYSTEM_PROMPT = `
+You are the reasoning backend for a local Codex coding session. Codex owns files, shell, patches, tests, and approvals.
+Return exactly one JSON object with no Markdown fence and no extra prose.
+Shapes:
+{"type":"final","text":"..."}
+{"type":"function_call","name":"exact tool name","arguments":{...}}
+{"type":"custom_tool_call","name":"exact tool name","input":"raw input"}
+Never invent a tool name. Call only one client tool per response. Prefer tools over claiming you already inspected local files.
+`;
+
 export function openRouterApiKey(config) {
   const fromConfig = typeof config?.openrouterApiKey === 'string' ? config.openrouterApiKey.trim() : '';
   if (fromConfig) return fromConfig;
@@ -74,7 +84,12 @@ export class OpenRouterClient {
         },
         body: JSON.stringify({
           model: this.config.openrouterModel,
-          messages: [{ role: 'user', content: entry.message }],
+          messages: [
+            { role: 'system', content: OPENROUTER_SYSTEM_PROMPT },
+            { role: 'user', content: entry.message }
+          ],
+          response_format: { type: 'json_object' },
+          temperature: 0,
           stream: false
         }),
         signal: controller.signal

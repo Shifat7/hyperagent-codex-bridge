@@ -2,7 +2,7 @@ import { access, chmod, copyFile, cp, mkdir, readFile, rm, writeFile } from 'nod
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HyperagentClient } from './hyperagent.mjs';
+import { createUpstreamClient } from './bridge.mjs';
 import { atomicWriteJson, atomicWriteText, bridgeUrl, ensureStateDir, modelCatalogPath } from './config.mjs';
 import { buildAgentModels, modelInfo } from './protocol.mjs';
 
@@ -91,11 +91,15 @@ export async function installSkill() {
 export async function generateCatalog(config, agents = null) {
   let client;
   if (!agents) {
-    client = new HyperagentClient(config);
+    client = createUpstreamClient(config);
     agents = await client.listAgents();
   }
   try {
-    if (!agents.length) throw new Error('No named Hyperagent agents are reachable. Create at least one agent before installing the Codex profile.');
+    if (!agents.length) {
+      throw new Error(config.upstream === 'openrouter'
+        ? 'OpenRouter upstream is selected but no synthetic agent was exposed. Check openrouterModel and try again.'
+        : 'No named Hyperagent agents are reachable. Create at least one agent before installing the Codex profile.');
+    }
     const byId = new Map(agents.map(agent => [agent.id, agent]));
     const aliasModels = Object.entries(config.aliases || {})
       .filter(([, agentId]) => byId.has(agentId))

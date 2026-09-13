@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 export const APP_NAME = 'hyperagent-codex-bridge';
-export const VERSION = '0.4.2';
+export const VERSION = '0.5.0';
 export const CONFIG_SCHEMA_VERSION = 2;
 export const SAFE_MAX_REQUESTS_PER_DAY = 6;
 export const DEFAULT_MCP_URL = 'https://hyperagent.com/api/mcp';
@@ -117,13 +117,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxInputChars: 24000,
   maxTurnChars: 6000,
   maxConversationTurns: 8,
-  maxForwardedTools: 32,
+  maxForwardedTools: 10,
   maxPromptChars: 70000,
   blockMultiAgentTools: true,
 debugPromptExcerpts: false,
   enableSmartToolSelection: true,
   forwardFullToolSchemas: false,
-  maxToolDescriptionChars: 160,
+  maxToolDescriptionChars: 120,
   enableToolResultReducer: true,
   maxSuccessfulCommandLines: 20,
   maxFailedCommandLines: 80,

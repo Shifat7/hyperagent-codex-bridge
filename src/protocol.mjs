@@ -151,6 +151,17 @@ function contentToText(content) {
     .join('\n');
 }
 
+function scrubCodexChrome(text) {
+  return String(text || '')
+    .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/gi, '')
+    .replace(/<plugins_instructions>[\s\S]*?<\/plugins_instructions>/gi, '')
+    .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/gi, '')
+    .replace(/<skill>[\s\S]*?<\/skill>/gi, '')
+    .replace(/<apps_instructions>[\s\S]*?<\/apps_instructions>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function injectedContext(text, role) {
   const value = String(text || '').trimStart();
   if (role === 'developer' || role === 'system') return true;
@@ -161,6 +172,7 @@ function injectedContext(text, role) {
     '<collaboration_mode>',
     '<apps_instructions>',
     '<plugins_instructions>',
+    '<recommended_plugins>',
     '<skills_instructions>',
     '<skill>',
     '# AGENTS.md instructions for '
@@ -177,7 +189,7 @@ export function retentionLimits(config = {}) {
   const maxTurnChars = Math.max(1000, Number(config.maxTurnChars || 12000));
   const maxConversationTurns = Math.max(2, Number(config.maxConversationTurns || 12));
   const maxInputChars = Math.max(maxTurnChars, Number(config.maxInputChars || 48000));
-  const maxForwardedTools = Math.max(4, Number(config.maxForwardedTools || 64));
+  const maxForwardedTools = Math.max(4, Number(config.maxForwardedTools || 10));
   return { maxTurnChars, maxConversationTurns, maxInputChars, maxForwardedTools };
 }
 
@@ -289,8 +301,8 @@ export function normalizeInput(input, config = {}) {
     if (type === 'additional_tools') continue;
     if (type === 'message') {
       const role = item.role || 'user';
-      const text = contentToText(item.content);
-      if (injectedContext(text, role)) continue;
+      let text = scrubCodexChrome(contentToText(item.content));
+      if (!text || injectedContext(text, role)) continue;
       turns.push({ role, text: compact(text, perTurnLimit) });
       continue;
     }
@@ -434,6 +446,8 @@ export function classifyTurn(input) {
   if (INSPECT_PATTERN.test(text) || /\bwhere (is|are|do|does|can)\b/.test(text)) return 'read_or_search';
   const isQuestion = text.includes('?') || QUESTION_START.test(text);
   if (isQuestion && !LOCAL_NOUNS.test(text) && !sawToolUse && text.length <= 200) return 'final_answer_only';
+  // Once local tools are in play, keep a coding toolchain instead of dumping every tool.
+  if (sawToolUse) return 'edit_code';
   return 'unknown';
 }
 
@@ -444,15 +458,84 @@ const TASK_TOOL_CATEGORIES = Object.freeze({
   debug_failure: ['edit', 'read', 'shell', 'tool_search']
 });
 
+const KNOWN_TOOL_CATEGORIES = Object.freeze({
+  exec_command: 'shell',
+  write_stdin: 'shell',
+  shell_command: 'shell',
+  shell: 'shell',
+  apply_patch: 'edit',
+  write_file: 'edit',
+  edit_file: 'edit',
+  read_file: 'read',
+  grep_files: 'read',
+  grep_search: 'read',
+  list_dir: 'read',
+  glob_files: 'read'
+});
+
+function isDeferredMcpTool(tool) {
+  const name = String(tool?.name || '');
+  return name.startsWith('mcp__')
+    || /^(list|read)_mcp_/.test(name)
+    || name.includes('mcp_resource');
+}
+
 function toolCategory(tool) {
   if (tool?.type === 'tool_search') return 'tool_search';
+  const name = String(tool?.name || '');
+  if (KNOWN_TOOL_CATEGORIES[name]) return KNOWN_TOOL_CATEGORIES[name];
   if (tool?.type === 'custom') return 'edit';
-  const tokens = String(tool?.name || '').split(/[^a-zA-Z0-9]+/).filter(Boolean).map(token => token.toLowerCase());
+  if (isDeferredMcpTool(tool)) return 'mcp';
+  const tokens = name.split(/[^a-zA-Z0-9]+/).filter(Boolean).map(token => token.toLowerCase());
   const has = words => tokens.some(token => words.includes(token));
+  if (has(['stdin', 'pty'])) return 'shell';
   if (has(['read', 'cat', 'view', 'open', 'ls', 'glob', 'grep', 'search', 'find', 'list', 'inspect', 'fetch', 'query', 'look'])) return 'read';
   if (has(['edit', 'write', 'patch', 'apply', 'create', 'insert', 'replace', 'update', 'delete', 'remove', 'rename', 'move', 'save'])) return 'edit';
   if (has(['shell', 'exec', 'execute', 'bash', 'zsh', 'sh', 'terminal', 'command', 'cmd', 'run'])) return 'shell';
   return 'other';
+}
+
+function usedToolNames(input) {
+  const names = new Set();
+  if (!Array.isArray(input)) return names;
+  for (const item of input) {
+    if (!item || typeof item !== 'object') continue;
+    if (typeof item.name === 'string' && item.name) names.add(item.name);
+  }
+  return names;
+}
+
+function prioritizeTools(tools, usedNames) {
+  const coreRank = name => {
+    const order = ['apply_patch', 'exec_command', 'shell', 'shell_command', 'read_file', 'grep_files', 'grep_search', 'write_file', 'write_stdin'];
+    const index = order.indexOf(name);
+    return index >= 0 ? index : 100;
+  };
+  return [...tools].sort((a, b) => {
+    const aUsed = usedNames.has(a.name) ? 0 : 1;
+    const bUsed = usedNames.has(b.name) ? 0 : 1;
+    if (aUsed !== bUsed) return aUsed - bUsed;
+    const aMcp = isDeferredMcpTool(a) ? 1 : 0;
+    const bMcp = isDeferredMcpTool(b) ? 1 : 0;
+    if (aMcp !== bMcp) return aMcp - bMcp;
+    return coreRank(a.name) - coreRank(b.name);
+  });
+}
+
+function capByCategory(tools, limits) {
+  const counts = Object.create(null);
+  const out = [];
+  for (const tool of tools) {
+    const category = toolCategory(tool);
+    const limit = limits[category];
+    if (limit == null) {
+      out.push(tool);
+      continue;
+    }
+    counts[category] = (counts[category] || 0) + 1;
+    if (counts[category] <= limit) out.push(tool);
+  }
+  return out;
 }
 
 function minimiseParameters(parameters) {
@@ -485,16 +568,39 @@ function minimiseToolSchemas(tools, config) {
   });
 }
 
-export function shortlistTools(tools, taskType, config = {}) {
+export function shortlistTools(tools, taskType, config = {}, input = null) {
   if (taskType === 'final_answer_only') return [];
+  const usedNames = usedToolNames(input);
   const categories = TASK_TOOL_CATEGORIES[taskType];
-  let selected = Array.isArray(tools) ? tools : [];
+  let selected = Array.isArray(tools) ? [...tools] : [];
   if (categories) {
-    const matched = selected.filter(tool => categories.includes(toolCategory(tool)));
+    const matched = selected.filter(tool => categories.includes(toolCategory(tool)) || usedNames.has(tool.name));
     if (matched.length) selected = matched;
   }
-  const capped = selected.slice(0, Math.max(4, Number(config.maxForwardedTools || 64)));
-  return minimiseToolSchemas(capped, config);
+  // Drop deferred MCP inventory unless already used this conversation.
+  selected = selected.filter(tool => usedNames.has(tool.name) || !isDeferredMcpTool(tool));
+  selected = prioritizeTools(selected, usedNames);
+  // Soft per-category caps; previously used tools always keep a slot.
+  const categoryLimits = {
+    shell: 2,
+    edit: 2,
+    read: 3,
+    tool_search: 1,
+    mcp: 0,
+    other: 0
+  };
+  const used = selected.filter(tool => usedNames.has(tool.name));
+  const fresh = capByCategory(selected.filter(tool => !usedNames.has(tool.name)), categoryLimits);
+  const merged = [];
+  const seen = new Set();
+  for (const tool of [...used, ...fresh]) {
+    const key = `${tool.type}:${tool.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(tool);
+  }
+  const maxTools = Math.max(4, Number(config.maxForwardedTools || 10));
+  return minimiseToolSchemas(merged.slice(0, maxTools), config);
 }
 
 export function extractClientTools(body, config = {}) {
@@ -506,8 +612,8 @@ export function extractClientTools(body, config = {}) {
     }
   }
   const normalized = normalizeTools(tools, config);
-  if (!config.enableSmartToolSelection) return normalized;
-  return shortlistTools(normalized, classifyTurn(body?.input), config);
+  if (!config.enableSmartToolSelection) return normalized
+  return shortlistTools(normalized, classifyTurn(body?.input), config, body?.input);
 }
 
 function relayPromptSections(body, agent, config = {}, extractedTools = null, checkpoint = null) {
@@ -538,11 +644,14 @@ function relayPromptSections(body, agent, config = {}, extractedTools = null, ch
     `IMPORTANT: ${toolList}`,
     'If a local action is needed, return a function_call naming one listed tool. Do not refuse. Do not say you cannot do it.',
     'Never invent a tool name. Only use names from the list above.',
+    'Prefer exec_command / apply_patch / read tools over MCP resource tools.',
+    'For apply_patch, input MUST start with "*** Begin Patch" and end with "*** End Patch".',
+    'Keep .hacb/CODEX_STATE.md and .hacb/TEST_LOG.md updated with brief local notes when the task spans multiple steps.',
     '',
     'Return exactly one JSON object, no extra text before or after.',
     '{"type":"final","text":"your final answer to show the user"}',
     '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
-    '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
+    '{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: path\n@@\n-old\n+new\n*** End Patch"}',
     '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
     '',
     'After a tool result appears in the conversation, either call another tool or return final. Keep final answers concise.',
@@ -634,8 +743,54 @@ function parseJsonCandidate(text) {  const trimmed = String(text || '').trim();
   }
 }
 
+
+export function sanitizeApplyPatchInput(name, input) {
+  const text = String(input ?? '');
+  if (!name || !/apply_patch/i.test(String(name))) return text;
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  if (/^\*\*\* Begin Patch/m.test(trimmed)) {
+    if (!/\*\*\* End Patch\s*$/m.test(trimmed)) return `${trimmed}\n*** End Patch`;
+    return trimmed;
+  }
+  // Common model misfire: raw unified diff or Codex patch body without fences.
+  if (
+    /\*\*\* (?:Add|Update|Delete) File:/.test(trimmed)
+    || /^diff --git /m.test(trimmed)
+    || /^@@ /m.test(trimmed)
+  ) {
+    return `*** Begin Patch\n${trimmed}\n*** End Patch`;
+  }
+  return trimmed;
+}
+
+function coerceRelayShape(parsed, tools = []) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed;
+  const known = new Set(['final', 'function_call', 'function_calls', 'custom_tool_call', 'tool_search_call', 'tool_search']);
+  if (known.has(parsed.type)) return parsed;
+  const typeName = typeof parsed.type === 'string' ? parsed.type : null;
+  const byType = typeName ? tools.find(item => item?.type === 'function' && item.name === typeName) : null;
+  if (byType) {
+    let args = parsed.arguments;
+    if (args == null) {
+      args = { ...parsed };
+      delete args.type;
+      delete args.name;
+    }
+    return { type: 'function_call', name: typeName, arguments: args };
+  }
+  if (typeof parsed.name === 'string' && tools.some(item => item?.type === 'function' && item.name === parsed.name)) {
+    return {
+      type: 'function_call',
+      name: parsed.name,
+      arguments: parsed.arguments != null ? parsed.arguments : {}
+    };
+  }
+  return parsed;
+}
+
 export function parseRelayOutput(text, tools = [], config = {}) {
-  const parsed = parseJsonCandidate(text);
+  const parsed = coerceRelayShape(parseJsonCandidate(text), tools);
   if (!parsed || typeof parsed !== 'object') return { type: 'final', text: String(text || '') };
   if (parsed.type === 'function_calls' && Array.isArray(parsed.calls) && config.enableMultiToolCalls === true) {
     const maxCalls = Math.max(1, Number(config.maxToolCallsPerResponse || 3));
@@ -664,7 +819,7 @@ export function parseRelayOutput(text, tools = [], config = {}) {
   if (parsed.type === 'custom_tool_call') {
     const tool = tools.find(item => item?.type === 'custom' && item.name === parsed.name);
     if (!tool) return { type: 'final', text: `Hyperagent requested unavailable custom tool '${parsed.name}'.\n\n${text}` };
-    return { type: 'custom_tool_call', name: parsed.name, input: String(parsed.input || '') };
+    return { type: 'custom_tool_call', name: parsed.name, input: sanitizeApplyPatchInput(parsed.name, parsed.input) };
   }
   if (parsed.type === 'tool_search_call' || parsed.type === 'tool_search') {
     const tool = tools.find(item => item?.type === 'tool_search');

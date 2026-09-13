@@ -179,11 +179,16 @@ async function runDoctor(config) {
   const budget = await getDailyBudgetStatus(config);
   report(budget.remaining > 0, 'Daily request budget', `${budget.used}/${budget.limit} used, ${budget.remaining} remaining`);
   report(budget.limit <= SAFE_MAX_REQUESTS_PER_DAY, 'Safe request ceiling', budget.limit <= SAFE_MAX_REQUESTS_PER_DAY ? `${budget.limit} per UTC day` : `custom cap ${budget.limit} exceeds safe default ${SAFE_MAX_REQUESTS_PER_DAY}`);
-  try {
-    const token = await getAccessToken(config, { require: false });
-    report(Boolean(token), 'Hyperagent OAuth', token ? 'connected' : 'run hacb login');
-  } catch (error) {
-    report(false, 'Hyperagent OAuth', error.message);
+  if (config.upstream === 'openrouter') {
+    report(true, 'Upstream', `openrouter (${config.openrouterModel || 'unconfigured model'})`);
+    report(Boolean(process.env.OPENROUTER_API_KEY || config.openrouterApiKey), 'OpenRouter API key', process.env.OPENROUTER_API_KEY ? 'OPENROUTER_API_KEY' : (config.openrouterApiKey ? 'config' : 'missing'));
+  } else {
+    try {
+      const token = await getAccessToken(config, { require: false });
+      report(Boolean(token), 'Hyperagent OAuth', token ? 'connected' : 'run hacb login');
+    } catch (error) {
+      report(false, 'Hyperagent OAuth', error.message);
+    }
   }
   try {
     const agents = await listAgents(config);

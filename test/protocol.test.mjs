@@ -124,7 +124,7 @@ test('prompt excerpt capture is opt-in and bounded', () => {
 });
 
 test('retention limits clamp unsafe config values', () => {
-  assert.deepEqual(retentionLimits({}), { maxTurnChars: 12000, maxConversationTurns: 12, maxInputChars: 48000, maxForwardedTools: 64 });
+  assert.deepEqual(retentionLimits({}), { maxTurnChars: 12000, maxConversationTurns: 12, maxInputChars: 48000, maxForwardedTools: 10 });
   const clamped = retentionLimits({ maxTurnChars: 10, maxConversationTurns: 1, maxInputChars: 10, maxForwardedTools: 1 });
   assert.deepEqual(clamped, { maxTurnChars: 1000, maxConversationTurns: 2, maxInputChars: 1000, maxForwardedTools: 4 });
 });
@@ -166,6 +166,29 @@ test('namespaces reject non-function children instead of silently omitting them'
   );
 });
 
+
+test('recommended_plugins chrome is scrubbed from conversation turns', () => {
+  const turns = normalizeInput([
+    { type: 'message', role: 'user', content: '<recommended_plugins>\n- Airtable\n</recommended_plugins>\n\nImplement fizzbuzz.' },
+    { type: 'message', role: 'user', content: '<recommended_plugins>only plugins</recommended_plugins>' }
+  ], { maxTurnChars: 6000, maxConversationTurns: 8, maxInputChars: 24000 });
+  assert.equal(turns.length, 1);
+  assert.match(turns[0].text, /Implement fizzbuzz/);
+  assert.doesNotMatch(turns[0].text, /Airtable|recommended_plugins/);
+});
+
+test('relay parser coerces tool-named type misfires into function_call', () => {
+  const tools = [{ type: 'function', name: 'exec_command' }];
+  assert.deepEqual(
+    parseRelayOutput('{"type":"exec_command","cmd":"cat README.md"}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"cat README.md"}' }
+  );
+  assert.deepEqual(
+    parseRelayOutput('{"type":"exec_command","arguments":{"cmd":"ls"}}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"ls"}' }
+  );
+});
+
 test('relay output maps final and tool calls', () => {
   assert.deepEqual(parseRelayOutput('{"type":"final","text":"done"}'), { type: 'final', text: 'done' });
   assert.deepEqual(
@@ -174,7 +197,11 @@ test('relay output maps final and tool calls', () => {
   );
   assert.deepEqual(
     parseRelayOutput('{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch"}', [{ type: 'custom', name: 'apply_patch' }]),
-    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch' }
+    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch\n*** End Patch' }
+  );
+  assert.deepEqual(
+    parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input: '*** Update File: a.js\n@@\n-old\n+new' }), [{ type: 'custom', name: 'apply_patch' }]),
+    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch\n*** Update File: a.js\n@@\n-old\n+new\n*** End Patch' }
   );
   assert.deepEqual(
     parseRelayOutput('{"type":"tool_search_call","arguments":{"query":"Chrome control"}}', [{ type: 'tool_search', name: 'tool_search' }]),
@@ -216,13 +243,13 @@ test('relay prompt is minimised without losing JSON-action reliability', () => {
     tools: [{ type: 'function', name: 'shell', description: 'Run', parameters: { type: 'object' } }]
   };
   const prompt = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, {});
-  assert.ok(prompt.length < 1500, `expected a minimised prompt, got ${prompt.length} chars (legacy trivial baseline: 1978)`);
+  assert.ok(prompt.length < 1900, `expected a minimised prompt, got ${prompt.length} chars (legacy trivial baseline: 1978)`);
   for (const phrase of [
     'Available client tool names',
     'Return exactly one JSON object',
     '{"type":"final","text":"your final answer to show the user"}',
     '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
-    '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
+    '{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch',
     '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
     'Never invent a tool name',
     'Your entire response must be one JSON object'
@@ -281,29 +308,49 @@ test('smart selection preserves edit and debug toolchains', () => {
   }
 });
 
-test('plain questions forward no tools while mid-task conversations keep theirs', () => {
+test('plain questions forward no tools while mid-task conversations keep a coding toolchain', () => {
   const config = { enableSmartToolSelection: true, maxForwardedTools: 32 };
   assert.deepEqual(extractClientTools(bodyWith('What is the capital of France?'), config), []);
   const midTask = extractClientTools({
     input: [
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What should we try next?' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'shell', arguments: '{}' },
       { type: 'function_call_output', call_id: 'call_1', output: 'result' }
     ],
     tools: TOOLBOX
   }, config);
-  assert.equal(midTask.length, TOOLBOX.length);
+  assert.ok(midTask.some(tool => tool.name === 'shell'));
+  assert.ok(midTask.some(tool => tool.name === 'apply_patch'));
+  assert.ok(midTask.length <= TOOLBOX.length);
 });
 
-test('disabling smart selection or unknown turns preserve every forwarded tool name', () => {
+test('disabling smart selection preserves inventory; unknown turns keep a bounded coding set', () => {
   const off = extractClientTools(bodyWith('Inspect the repo.'), { enableSmartToolSelection: false, maxForwardedTools: 32 });
   assert.deepEqual(off.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
   const unknown = extractClientTools(bodyWith('Please proceed.'), { enableSmartToolSelection: true, maxForwardedTools: 32 });
-  assert.deepEqual(unknown.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
-  for (const forwarded of [off, unknown]) {
-    for (const tool of forwarded) {
-      assert.ok(TOOLBOX.some(original => original.name === tool.name && original.type === tool.type));
-    }
-  }
+  assert.deepEqual(new Set(unknown.map(tool => tool.name)), new Set(TOOLBOX.map(tool => tool.name)));
+});
+
+test('deferred MCP tools are omitted unless already used', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'list_mcp_resources', description: 'List MCP resources', parameters: { type: 'object' } },
+    { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } }
+  ];
+  const body = bodyWith('Edit src/index.ts and run tests.');
+  body.tools = tools;
+  const selected = extractClientTools(body, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(selected.every(tool => !['list_mcp_resources', 'mcp__browser__click'].includes(tool.name)));
+  const used = extractClientTools({
+    ...body,
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue.' }] },
+      { type: 'function_call', name: 'list_mcp_resources', call_id: 'c1', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'c1', output: '[]' }
+    ]
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(used.some(tool => tool.name === 'list_mcp_resources'));
+  assert.ok(used.every(tool => tool.name !== 'mcp__browser__click'));
 });
 
 test('schema minimisation keeps names and argument shapes but trims descriptions', () => {

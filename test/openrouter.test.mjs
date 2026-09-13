@@ -56,7 +56,11 @@ test('waitForThread relays the stored prompt to chat completions and parses the 
     const body = JSON.parse(calls[0].options.body);
     assert.equal(body.model, 'test/model-x');
     assert.equal(body.stream, false);
-    assert.deepEqual(body.messages, [{ role: 'user', content: 'RELAY PROMPT BODY' }]);
+    assert.equal(body.response_format?.type, 'json_object');
+    assert.equal(body.temperature, 0);
+    assert.equal(body.messages[0].role, 'system');
+    assert.match(body.messages[0].content, /Return exactly one JSON object/);
+    assert.deepEqual(body.messages[1], { role: 'user', content: 'RELAY PROMPT BODY' });
     assert.equal(result.text, '{"type":"final","text":"done"}');
     assert.equal(result.status, 'completed');
   } finally {
