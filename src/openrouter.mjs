@@ -94,6 +94,9 @@ export class OpenRouterClient {
           ],
           response_format: { type: 'json_object' },
           temperature: 0,
+          // Cap completion size so OpenRouter credit reservation stays affordable
+          // for high-default-max_tokens models (e.g. Claude Sonnet ~64k).
+          max_tokens: Math.max(256, Number(this.config.openrouterMaxTokens || 8192)),
           stream: false
         }),
         signal: controller.signal

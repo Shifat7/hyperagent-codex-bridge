@@ -1,6 +1,6 @@
 {
   "name": "hyperagent-codex-bridge",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Local OAuth bridge that exposes Hyperagent agents as a Codex Responses-compatible provider.",
   "type": "module",
   "bin": {
