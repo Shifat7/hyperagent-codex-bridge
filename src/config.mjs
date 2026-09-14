@@ -4,9 +4,10 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 export const APP_NAME = 'hyperagent-codex-bridge';
-export const VERSION = '0.5.3';
+export const VERSION = '0.5.4';
 export const CONFIG_SCHEMA_VERSION = 2;
 export const SAFE_MAX_REQUESTS_PER_DAY = 6;
+export const HARD_MAX_REQUESTS_PER_DAY = 10000;
 export const DEFAULT_MCP_URL = 'https://hyperagent.com/api/mcp';
 export const DEFAULT_ISSUER = 'https://hyperagent.com';
 export const DEFAULT_BRIDGE_PORT = 47831;
@@ -272,7 +273,7 @@ let idempotencyQueue = Promise.resolve();
 function dailyLimit(config) {
   const value = config?.maxRequestsPerDay;
   if (!Number.isSafeInteger(value) || value < 1) return SAFE_MAX_REQUESTS_PER_DAY;
-  return Math.min(value, 100);
+  return Math.min(value, HARD_MAX_REQUESTS_PER_DAY);
 }
 
 async function withFileLock(path, label, callback) {

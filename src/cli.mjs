@@ -16,6 +16,7 @@ import {
   startTask,
   stopTask,
   SAFE_MAX_REQUESTS_PER_DAY,
+  HARD_MAX_REQUESTS_PER_DAY,
   stateDir,
   VERSION,
   bridgeUrl
@@ -63,7 +64,7 @@ Usage:
   hacb explain-prompt [--verbose]  Break down where the last relay prompt's characters went
   hacb budget                Show the local daily Hyperagent request cap
   hacb budget --safe         Restore the six-request safe default
-  hacb budget --set <count>  Explicitly set a custom daily request cap (1-100)
+  hacb budget --set <count>  Explicitly set a custom daily request cap (1-10000)
   hacb task start <name>     Start a named task with its own Hyperagent budget
   hacb task status           Show the active task and its budget usage
   hacb task stop             Close the active task
@@ -440,8 +441,8 @@ async function main() {
         console.log(`Restored safe daily request cap: ${SAFE_MAX_REQUESTS_PER_DAY}.`);
       } else if (args[0] === '--set') {
         const requested = Number(args[1]);
-        if (!Number.isSafeInteger(requested) || requested < 1 || requested > 100) {
-          throw new Error('Usage: hacb budget --set <integer from 1 to 100>');
+        if (!Number.isSafeInteger(requested) || requested < 1 || requested > HARD_MAX_REQUESTS_PER_DAY) {
+          throw new Error(`Usage: hacb budget --set <integer from 1 to ${HARD_MAX_REQUESTS_PER_DAY}>`);
         }
         config.maxRequestsPerDay = requested;
         await saveConfig(config);
