@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OpenRouterClient } from '../src/openrouter.mjs';
+import { OpenRouterClient, openRouterApiKey, openRouterSystemPromptChars, OPENROUTER_SYSTEM_PROMPT } from '../src/openrouter.mjs';
 import { createUpstreamClient } from '../src/bridge.mjs';
 import { HyperagentClient } from '../src/hyperagent.mjs';
 import { buildAgentModels, resolveAgent } from '../src/protocol.mjs';
@@ -56,7 +56,11 @@ test('waitForThread relays the stored prompt to chat completions and parses the 
     const body = JSON.parse(calls[0].options.body);
     assert.equal(body.model, 'test/model-x');
     assert.equal(body.stream, false);
-    assert.deepEqual(body.messages, [{ role: 'user', content: 'RELAY PROMPT BODY' }]);
+    assert.equal(body.response_format?.type, 'json_object');
+    assert.equal(body.temperature, 0);
+    assert.equal(body.messages[0].role, 'system');
+    assert.match(body.messages[0].content, /Return exactly one JSON object/);
+    assert.deepEqual(body.messages[1], { role: 'user', content: 'RELAY PROMPT BODY' });
     assert.equal(result.text, '{"type":"final","text":"done"}');
     assert.equal(result.status, 'completed');
   } finally {
@@ -126,4 +130,23 @@ test('bridge selects the upstream client based on config.upstream', () => {
     () => createUpstreamClient({ upstream: 'carrier-pigeon' }),
     error => /unsupported upstream/i.test(error.message)
   );
+});
+
+
+test('whitespace-only OpenRouter keys are treated as missing', () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = '   ';
+  try {
+    assert.equal(openRouterApiKey({}), null);
+    assert.equal(openRouterApiKey({ openrouterApiKey: ' \t ' }), null);
+    assert.equal(openRouterApiKey({ openrouterApiKey: 'sk-real' }), 'sk-real');
+  } finally {
+    if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previous;
+  }
+});
+
+test('OpenRouter system prompt length is exported for budget accounting', () => {
+  assert.equal(openRouterSystemPromptChars(), OPENROUTER_SYSTEM_PROMPT.length);
+  assert.ok(OPENROUTER_SYSTEM_PROMPT.length > 100);
 });

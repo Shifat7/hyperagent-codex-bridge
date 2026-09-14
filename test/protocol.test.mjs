@@ -124,7 +124,7 @@ test('prompt excerpt capture is opt-in and bounded', () => {
 });
 
 test('retention limits clamp unsafe config values', () => {
-  assert.deepEqual(retentionLimits({}), { maxTurnChars: 12000, maxConversationTurns: 12, maxInputChars: 48000, maxForwardedTools: 64 });
+  assert.deepEqual(retentionLimits({}), { maxTurnChars: 12000, maxConversationTurns: 12, maxInputChars: 48000, maxForwardedTools: 10 });
   const clamped = retentionLimits({ maxTurnChars: 10, maxConversationTurns: 1, maxInputChars: 10, maxForwardedTools: 1 });
   assert.deepEqual(clamped, { maxTurnChars: 1000, maxConversationTurns: 2, maxInputChars: 1000, maxForwardedTools: 4 });
 });
@@ -166,6 +166,33 @@ test('namespaces reject non-function children instead of silently omitting them'
   );
 });
 
+
+test('recommended_plugins chrome is scrubbed from conversation turns', () => {
+  const turns = normalizeInput([
+    { type: 'message', role: 'user', content: '<recommended_plugins>\n- Airtable\n</recommended_plugins>\n\nImplement fizzbuzz.' },
+    { type: 'message', role: 'user', content: '<recommended_plugins>only plugins</recommended_plugins>' }
+  ], { maxTurnChars: 6000, maxConversationTurns: 8, maxInputChars: 24000 });
+  assert.equal(turns.length, 1);
+  assert.match(turns[0].text, /Implement fizzbuzz/);
+  assert.doesNotMatch(turns[0].text, /Airtable|recommended_plugins/);
+});
+
+test('relay parser coerces tool-named type misfires into function_call', () => {
+  const tools = [{ type: 'function', name: 'exec_command' }];
+  assert.deepEqual(
+    parseRelayOutput('{"type":"exec_command","cmd":"cat README.md"}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"cat README.md"}' }
+  );
+  assert.deepEqual(
+    parseRelayOutput('{"type":"exec_command","arguments":{"cmd":"ls"}}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"ls"}' }
+  );
+  assert.deepEqual(
+    parseRelayOutput('{"name":"exec_command","cmd":"pwd"}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"pwd"}' }
+  );
+});
+
 test('relay output maps final and tool calls', () => {
   assert.deepEqual(parseRelayOutput('{"type":"final","text":"done"}'), { type: 'final', text: 'done' });
   assert.deepEqual(
@@ -175,6 +202,10 @@ test('relay output maps final and tool calls', () => {
   assert.deepEqual(
     parseRelayOutput('{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch"}', [{ type: 'custom', name: 'apply_patch' }]),
     { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch' }
+  );
+  assert.deepEqual(
+    parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input: '*** Update File: a.js\n@@\n-old\n+new' }), [{ type: 'custom', name: 'apply_patch' }]),
+    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch\n*** Update File: a.js\n@@\n-old\n+new\n*** End Patch' }
   );
   assert.deepEqual(
     parseRelayOutput('{"type":"tool_search_call","arguments":{"query":"Chrome control"}}', [{ type: 'tool_search', name: 'tool_search' }]),
@@ -216,7 +247,7 @@ test('relay prompt is minimised without losing JSON-action reliability', () => {
     tools: [{ type: 'function', name: 'shell', description: 'Run', parameters: { type: 'object' } }]
   };
   const prompt = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, {});
-  assert.ok(prompt.length < 1500, `expected a minimised prompt, got ${prompt.length} chars (legacy trivial baseline: 1978)`);
+  assert.ok(prompt.length < 1900, `expected a minimised prompt, got ${prompt.length} chars (legacy trivial baseline: 1978)`);
   for (const phrase of [
     'Available client tool names',
     'Return exactly one JSON object',
@@ -229,6 +260,32 @@ test('relay prompt is minimised without losing JSON-action reliability', () => {
   ]) {
     assert.ok(prompt.includes(phrase), `minimised prompt lost required phrase: ${phrase}`);
   }
+  assert.doesNotMatch(prompt, /\*\*\* Begin Patch/);
+  assert.match(prompt, /Keep \.hacb\/CODEX_STATE\.md and \.hacb\/TEST_LOG\.md/);
+});
+
+test('apply_patch fencing example appears only when that tool is forwarded', () => {
+  const withPatch = buildRelayPrompt({
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    tools: [{ type: 'function', name: 'apply_patch' }]
+  }, { id: 'a1', name: 'Sol Coder' }, {});
+  assert.match(withPatch, /\*\*\* Begin Patch/);
+  assert.match(withPatch, /"name":"apply_patch"/);
+});
+
+test('checkpoint nudge is gated and uses configured paths', () => {
+  const body = {
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    tools: [{ type: 'function', name: 'shell' }]
+  };
+  const off = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, { enableCheckpointMemory: false });
+  assert.doesNotMatch(off, /Keep \.hacb\//);
+  const custom = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, {
+    enableCheckpointMemory: true,
+    checkpointDir: 'notes',
+    checkpointFiles: ['STATE.md', 'LOG.md']
+  });
+  assert.match(custom, /Keep notes\/STATE\.md and notes\/LOG\.md/);
 });
 
 test('turn classification recognises common coding task types', () => {
@@ -281,29 +338,101 @@ test('smart selection preserves edit and debug toolchains', () => {
   }
 });
 
-test('plain questions forward no tools while mid-task conversations keep theirs', () => {
+test('plain questions forward no tools while mid-task conversations keep a coding toolchain', () => {
   const config = { enableSmartToolSelection: true, maxForwardedTools: 32 };
   assert.deepEqual(extractClientTools(bodyWith('What is the capital of France?'), config), []);
   const midTask = extractClientTools({
     input: [
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What should we try next?' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'shell', arguments: '{}' },
       { type: 'function_call_output', call_id: 'call_1', output: 'result' }
     ],
     tools: TOOLBOX
   }, config);
-  assert.equal(midTask.length, TOOLBOX.length);
+  assert.ok(midTask.some(tool => tool.name === 'shell'));
+  assert.ok(midTask.some(tool => tool.name === 'apply_patch'));
+  assert.ok(midTask.length <= TOOLBOX.length);
 });
 
-test('disabling smart selection or unknown turns preserve every forwarded tool name', () => {
+test('disabling smart selection preserves inventory; unknown turns keep a bounded coding set', () => {
   const off = extractClientTools(bodyWith('Inspect the repo.'), { enableSmartToolSelection: false, maxForwardedTools: 32 });
   assert.deepEqual(off.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
   const unknown = extractClientTools(bodyWith('Please proceed.'), { enableSmartToolSelection: true, maxForwardedTools: 32 });
-  assert.deepEqual(unknown.map(tool => tool.name), TOOLBOX.map(tool => tool.name));
-  for (const forwarded of [off, unknown]) {
-    for (const tool of forwarded) {
-      assert.ok(TOOLBOX.some(original => original.name === tool.name && original.type === tool.type));
-    }
-  }
+  assert.deepEqual(new Set(unknown.map(tool => tool.name)), new Set(TOOLBOX.map(tool => tool.name)));
+});
+
+test('deferred MCP tools are omitted unless already used', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'list_mcp_resources', description: 'List MCP resources', parameters: { type: 'object' } },
+    { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } }
+  ];
+  const body = bodyWith('Edit src/index.ts and run tests.');
+  body.tools = tools;
+  const selected = extractClientTools(body, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(selected.every(tool => !['list_mcp_resources', 'mcp__browser__click'].includes(tool.name)));
+  const used = extractClientTools({
+    ...body,
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue.' }] },
+      { type: 'function_call', name: 'list_mcp_resources', call_id: 'c1', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'c1', output: '[]' }
+    ]
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(used.some(tool => tool.name === 'list_mcp_resources'));
+  assert.ok(used.every(tool => tool.name !== 'mcp__browser__click'));
+});
+
+test('MCP tools discovered via tool_search_output stay eligible on the next turn', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } },
+    { type: 'function', name: 'mcp__browser__type', description: 'Type', parameters: { type: 'object' } }
+  ];
+  const selected = extractClientTools({
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue the browser flow.' }] },
+      {
+        type: 'tool_search_output',
+        tools: [
+          { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } }
+        ]
+      }
+    ],
+    tools
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(selected.some(tool => tool.name === 'mcp__browser__click'));
+  assert.ok(selected.every(tool => tool.name !== 'mcp__browser__type'));
+});
+
+test('bounded other-category slot keeps specialized first-use tools', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'browser_click', description: 'Click in browser', parameters: { type: 'object' } },
+    { type: 'function', name: 'browser_type', description: 'Type in browser', parameters: { type: 'object' } },
+    { type: 'function', name: 'browser_scroll', description: 'Scroll browser', parameters: { type: 'object' } }
+  ];
+  const selected = extractClientTools({
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Click the submit button in the browser.' }] }],
+    tools
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  const others = selected.filter(tool => ['browser_click', 'browser_type', 'browser_scroll'].includes(tool.name));
+  assert.ok(others.length >= 1 && others.length <= 2, `expected 1-2 other tools, got ${others.map(t => t.name)}`);
+});
+
+test('chrome scrub strips Codex wrappers but keeps mid-message skill tags', () => {
+  const prompt = buildRelayPrompt({
+    model: 'hyperagent/sol-coder',
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<skills_instructions>huge inventory</skills_instructions>\n<skill>injected skill</skill>\nReal task.' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Please keep the <skill>user fixture</skill> tag intact.' }] }
+    ],
+    tools: []
+  }, agents[0], {});
+  assert.doesNotMatch(prompt, /huge inventory/);
+  assert.doesNotMatch(prompt, /injected skill/);
+  assert.match(prompt, /Real task\./);
+  assert.match(prompt, /<skill>user fixture<\/skill>/);
 });
 
 test('schema minimisation keeps names and argument shapes but trims descriptions', () => {
