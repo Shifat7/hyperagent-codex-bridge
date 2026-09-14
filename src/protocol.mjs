@@ -770,8 +770,13 @@ function parseJsonCandidate(text) {  const trimmed = String(text || '').trim();
 export function sanitizeApplyPatchInput(name, input) {
   const text = String(input ?? '');
   if (!name || !/apply_patch/i.test(String(name))) return text;
-  const trimmed = text.trim();
+  let trimmed = text.trim();
   if (!trimmed) return trimmed;
+  // Models sometimes emit a split hunk header:
+  //   @@
+  //   -1,9 +1,31 @@
+  // instead of `@@ -1,9 +1,31 @@`, which Codex treats as search context.
+  trimmed = trimmed.replace(/^@@\s*\n-(\d+),(\d+) \+(\d+),(\d+) @@\s*$/gm, '@@ -$1,$2 +$3,$4 @@');
   if (/^\*\*\* Begin Patch/m.test(trimmed)) {
     if (/\*\*\* End Patch/m.test(trimmed)) return trimmed;
     // Only auto-close when there is patch body after the Begin marker.

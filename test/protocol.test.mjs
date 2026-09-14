@@ -194,6 +194,23 @@ test('relay parser coerces tool-named type misfires into function_call', () => {
 });
 
 
+
+test('sanitizeApplyPatchInput rewrites split apply_patch hunk headers', () => {
+  const tools = [{ type: 'custom', name: 'apply_patch' }];
+  const raw = [
+    '*** Begin Patch',
+    '*** Update File: store.mjs',
+    '@@',
+    '-1,9 +1,31 @@',
+    '-old',
+    '+new',
+    '*** End Patch'
+  ].join('\n');
+  const parsed = parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input: raw }), tools);
+  assert.match(parsed.input, /@@ -1,9 \+1,31 @@/);
+  assert.doesNotMatch(parsed.input, /^@@\n-1,9 \+1,31 @@/m);
+});
+
 test('apply_patch function_call and bare-type misfires coerce into custom_tool_call', () => {
   const tools = [{ type: 'custom', name: 'apply_patch' }];
   const patch = '*** Begin Patch\n*** Update File: a.js\n@@\n-old\n+new\n*** End Patch';
