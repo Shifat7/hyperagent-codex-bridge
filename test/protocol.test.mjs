@@ -193,6 +193,20 @@ test('relay parser coerces tool-named type misfires into function_call', () => {
   );
 });
 
+
+test('apply_patch function_call and bare-type misfires coerce into custom_tool_call', () => {
+  const tools = [{ type: 'custom', name: 'apply_patch' }];
+  const patch = '*** Begin Patch\n*** Update File: a.js\n@@\n-old\n+new\n*** End Patch';
+  assert.deepEqual(
+    parseRelayOutput(JSON.stringify({ type: 'function_call', name: 'apply_patch', arguments: { input: patch } }), tools),
+    { type: 'custom_tool_call', name: 'apply_patch', input: patch }
+  );
+  assert.deepEqual(
+    parseRelayOutput(JSON.stringify({ type: 'apply_patch', input: patch }), tools),
+    { type: 'custom_tool_call', name: 'apply_patch', input: patch }
+  );
+});
+
 test('relay output maps final and tool calls', () => {
   assert.deepEqual(parseRelayOutput('{"type":"final","text":"done"}'), { type: 'final', text: 'done' });
   assert.deepEqual(

@@ -805,6 +805,14 @@ function coerceRelayShape(parsed, tools = []) {
     }
     return { type: 'function_call', name: typeName, arguments: args };
   }
+  const customByType = typeName ? tools.find(item => item?.type === 'custom' && item.name === typeName) : null;
+  if (customByType) {
+    return {
+      type: 'custom_tool_call',
+      name: typeName,
+      input: parsed.input != null ? parsed.input : (parsed.arguments?.input ?? parsed.arguments ?? '')
+    };
+  }
   if (typeof parsed.name === 'string' && tools.some(item => item?.type === 'function' && item.name === parsed.name)) {
     let args = parsed.arguments;
     if (args == null) {
@@ -816,6 +824,13 @@ function coerceRelayShape(parsed, tools = []) {
       type: 'function_call',
       name: parsed.name,
       arguments: args
+    };
+  }
+  if (typeof parsed.name === 'string' && tools.some(item => item?.type === 'custom' && item.name === parsed.name)) {
+    return {
+      type: 'custom_tool_call',
+      name: parsed.name,
+      input: parsed.input != null ? parsed.input : (parsed.arguments?.input ?? parsed.arguments ?? '')
     };
   }
   return parsed;
@@ -841,12 +856,35 @@ export function parseRelayOutput(text, tools = [], config = {}) {
   }
   if (parsed.type === 'function_call') {
     const tool = tools.find(item => item?.type === 'function' && item.name === parsed.name);
-    if (!tool) return { type: 'final', text: `Hyperagent requested unavailable function tool '${parsed.name}'.\n\n${text}` };
-    return {
-      type: 'function_call',
-      name: parsed.name,
-      arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments || {})
-    };
+    if (tool) {
+      return {
+        type: 'function_call',
+        name: parsed.name,
+        arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments || {})
+      };
+    }
+    // Models often emit apply_patch as function_call; Codex exposes it as a freeform custom tool.
+    const custom = tools.find(item => item?.type === 'custom' && item.name === parsed.name);
+    if (custom) {
+      let input = '';
+      const args = parsed.arguments;
+      if (typeof args === 'string') {
+        try {
+          const parsedArgs = JSON.parse(args);
+          input = parsedArgs?.input ?? parsedArgs?.patch ?? args;
+        } catch {
+          input = args;
+        }
+      } else if (args && typeof args === 'object') {
+        input = args.input ?? args.patch ?? JSON.stringify(args);
+      }
+      return {
+        type: 'custom_tool_call',
+        name: parsed.name,
+        input: sanitizeApplyPatchInput(parsed.name, input)
+      };
+    }
+    return { type: 'final', text: `Hyperagent requested unavailable function tool '${parsed.name}'.\n\n${text}` };
   }
   if (parsed.type === 'custom_tool_call') {
     const tool = tools.find(item => item?.type === 'custom' && item.name === parsed.name);
