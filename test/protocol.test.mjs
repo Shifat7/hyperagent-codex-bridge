@@ -207,8 +207,9 @@ test('sanitizeApplyPatchInput rewrites split apply_patch hunk headers', () => {
     '*** End Patch'
   ].join('\n');
   const parsed = parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input: raw }), tools);
-  assert.match(parsed.input, /@@ -1,9 \+1,31 @@/);
-  assert.doesNotMatch(parsed.input, /^@@\n-1,9 \+1,31 @@/m);
+  assert.match(parsed.input, /^@@$/m);
+  assert.doesNotMatch(parsed.input, /-1,9 \+1,31 @@/);
+  assert.doesNotMatch(parsed.input, /@@ -1,9 \+1,31 @@/);
 });
 
 test('apply_patch function_call and bare-type misfires coerce into custom_tool_call', () => {
@@ -626,3 +627,35 @@ const ROUTING_AGENTS = [
   { id: 'agent-debugger', name: 'debugger' },
   { id: 'agent-planner', name: 'planner' }
 ];
+
+test('sanitizeApplyPatchInput rewrites bare split hunk headers without leading @@', () => {
+  const input = [
+    '*** Begin Patch',
+    '*** Update File: store.mjs',
+    '-1,4 +1,38 @@',
+    '-old',
+    '+new',
+    '*** End Patch',
+  ].join('\n');
+  const parsed = parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input }), [
+    { type: 'custom', name: 'apply_patch' },
+  ]);
+  assert.match(parsed.input, /^@@$/m);
+  assert.doesNotMatch(parsed.input, /-1,4 \+1,38 @@/);
+  assert.doesNotMatch(parsed.input, /@@ -1,4 \+1,38 @@/);
+});
+
+test('sanitizeApplyPatchInput rewrites joined unified hunk headers to bare @@', () => {
+  const input = [
+    '*** Begin Patch',
+    '*** Update File: store.mjs',
+    '@@ -0,0 +1,38 @@',
+    '+line',
+    '*** End Patch',
+  ].join('\n');
+  const parsed = parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input }), [
+    { type: 'custom', name: 'apply_patch' },
+  ]);
+  assert.match(parsed.input, /^@@$/m);
+  assert.doesNotMatch(parsed.input, /@@ -0,0 \+1,38 @@/);
+});

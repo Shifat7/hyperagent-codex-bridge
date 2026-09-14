@@ -772,11 +772,15 @@ export function sanitizeApplyPatchInput(name, input) {
   if (!name || !/apply_patch/i.test(String(name))) return text;
   let trimmed = text.trim();
   if (!trimmed) return trimmed;
-  // Models sometimes emit a split hunk header:
+  // Codex freeform apply_patch wants a bare `@@` hunk marker.
+  // Models often emit unified-diff style headers (split or joined):
   //   @@
   //   -1,9 +1,31 @@
-  // instead of `@@ -1,9 +1,31 @@`, which Codex treats as search context.
-  trimmed = trimmed.replace(/^@@\s*\n-(\d+),(\d+) \+(\d+),(\d+) @@\s*$/gm, '@@ -$1,$2 +$3,$4 @@');
+  // or `-1,9 +1,31 @@` / `@@ -1,9 +1,31 @@`
+  // Codex then treats the range text as search context and the patch fails.
+  trimmed = trimmed.replace(/^@@\s*\n-\d+,\d+ \+\d+,\d+ @@\s*$/gm, '@@');
+  trimmed = trimmed.replace(/^-\d+,\d+ \+\d+,\d+ @@\s*$/gm, '@@');
+  trimmed = trimmed.replace(/^@@ -\d+,\d+ \+\d+,\d+ @@\s*$/gm, '@@');
   if (/^\*\*\* Begin Patch/m.test(trimmed)) {
     if (/\*\*\* End Patch/m.test(trimmed)) return trimmed;
     // Only auto-close when there is patch body after the Begin marker.
