@@ -21,7 +21,7 @@ import {
   bridgeUrl
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
-import { OpenRouterClient } from './openrouter.mjs';
+import { OpenRouterClient, openRouterApiKey } from './openrouter.mjs';
 import {
   codexProfilePath,
   generateCatalog,
@@ -181,7 +181,11 @@ async function runDoctor(config) {
   report(budget.limit <= SAFE_MAX_REQUESTS_PER_DAY, 'Safe request ceiling', budget.limit <= SAFE_MAX_REQUESTS_PER_DAY ? `${budget.limit} per UTC day` : `custom cap ${budget.limit} exceeds safe default ${SAFE_MAX_REQUESTS_PER_DAY}`);
   if (config.upstream === 'openrouter') {
     report(true, 'Upstream', `openrouter (${config.openrouterModel || 'unconfigured model'})`);
-    report(Boolean(process.env.OPENROUTER_API_KEY || config.openrouterApiKey), 'OpenRouter API key', process.env.OPENROUTER_API_KEY ? 'OPENROUTER_API_KEY' : (config.openrouterApiKey ? 'config' : 'missing'));
+    {
+      const key = openRouterApiKey(config);
+      const fromEnv = Boolean(typeof process.env.OPENROUTER_API_KEY === 'string' && process.env.OPENROUTER_API_KEY.trim());
+      report(Boolean(key), 'OpenRouter API key', key ? (fromEnv ? 'OPENROUTER_API_KEY' : 'config') : 'missing');
+    }
   } else {
     try {
       const token = await getAccessToken(config, { require: false });

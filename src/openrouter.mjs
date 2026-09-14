@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-const OPENROUTER_SYSTEM_PROMPT = `
+export const OPENROUTER_SYSTEM_PROMPT = `
 You are the reasoning backend for a local Codex coding session. Codex owns files, shell, patches, tests, and approvals.
 Return exactly one JSON object with no Markdown fence and no extra prose.
 Shapes:
@@ -9,6 +9,10 @@ Shapes:
 {"type":"custom_tool_call","name":"exact tool name","input":"raw input"}
 Never invent a tool name. Call only one client tool per response. Prefer tools over claiming you already inspected local files.
 `;
+
+export function openRouterSystemPromptChars() {
+  return OPENROUTER_SYSTEM_PROMPT.length;
+}
 
 export function openRouterApiKey(config) {
   const fromConfig = typeof config?.openrouterApiKey === 'string' ? config.openrouterApiKey.trim() : '';

@@ -187,6 +187,10 @@ test('relay parser coerces tool-named type misfires into function_call', () => {
     parseRelayOutput('{"type":"exec_command","arguments":{"cmd":"ls"}}', tools),
     { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"ls"}' }
   );
+  assert.deepEqual(
+    parseRelayOutput('{"name":"exec_command","cmd":"pwd"}', tools),
+    { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"pwd"}' }
+  );
 });
 
 test('relay output maps final and tool calls', () => {
@@ -197,7 +201,7 @@ test('relay output maps final and tool calls', () => {
   );
   assert.deepEqual(
     parseRelayOutput('{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch"}', [{ type: 'custom', name: 'apply_patch' }]),
-    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch\n*** End Patch' }
+    { type: 'custom_tool_call', name: 'apply_patch', input: '*** Begin Patch' }
   );
   assert.deepEqual(
     parseRelayOutput(JSON.stringify({ type: 'custom_tool_call', name: 'apply_patch', input: '*** Update File: a.js\n@@\n-old\n+new' }), [{ type: 'custom', name: 'apply_patch' }]),
@@ -249,13 +253,39 @@ test('relay prompt is minimised without losing JSON-action reliability', () => {
     'Return exactly one JSON object',
     '{"type":"final","text":"your final answer to show the user"}',
     '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
-    '{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch',
+    '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
     '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
     'Never invent a tool name',
     'Your entire response must be one JSON object'
   ]) {
     assert.ok(prompt.includes(phrase), `minimised prompt lost required phrase: ${phrase}`);
   }
+  assert.doesNotMatch(prompt, /\*\*\* Begin Patch/);
+  assert.match(prompt, /Keep \.hacb\/CODEX_STATE\.md and \.hacb\/TEST_LOG\.md/);
+});
+
+test('apply_patch fencing example appears only when that tool is forwarded', () => {
+  const withPatch = buildRelayPrompt({
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    tools: [{ type: 'function', name: 'apply_patch' }]
+  }, { id: 'a1', name: 'Sol Coder' }, {});
+  assert.match(withPatch, /\*\*\* Begin Patch/);
+  assert.match(withPatch, /"name":"apply_patch"/);
+});
+
+test('checkpoint nudge is gated and uses configured paths', () => {
+  const body = {
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    tools: [{ type: 'function', name: 'shell' }]
+  };
+  const off = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, { enableCheckpointMemory: false });
+  assert.doesNotMatch(off, /Keep \.hacb\//);
+  const custom = buildRelayPrompt(body, { id: 'a1', name: 'Sol Coder' }, {
+    enableCheckpointMemory: true,
+    checkpointDir: 'notes',
+    checkpointFiles: ['STATE.md', 'LOG.md']
+  });
+  assert.match(custom, /Keep notes\/STATE\.md and notes\/LOG\.md/);
 });
 
 test('turn classification recognises common coding task types', () => {
@@ -351,6 +381,58 @@ test('deferred MCP tools are omitted unless already used', () => {
   }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
   assert.ok(used.some(tool => tool.name === 'list_mcp_resources'));
   assert.ok(used.every(tool => tool.name !== 'mcp__browser__click'));
+});
+
+test('MCP tools discovered via tool_search_output stay eligible on the next turn', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } },
+    { type: 'function', name: 'mcp__browser__type', description: 'Type', parameters: { type: 'object' } }
+  ];
+  const selected = extractClientTools({
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue the browser flow.' }] },
+      {
+        type: 'tool_search_output',
+        tools: [
+          { type: 'function', name: 'mcp__browser__click', description: 'Click', parameters: { type: 'object' } }
+        ]
+      }
+    ],
+    tools
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  assert.ok(selected.some(tool => tool.name === 'mcp__browser__click'));
+  assert.ok(selected.every(tool => tool.name !== 'mcp__browser__type'));
+});
+
+test('bounded other-category slot keeps specialized first-use tools', () => {
+  const tools = [
+    ...TOOLBOX,
+    { type: 'function', name: 'browser_click', description: 'Click in browser', parameters: { type: 'object' } },
+    { type: 'function', name: 'browser_type', description: 'Type in browser', parameters: { type: 'object' } },
+    { type: 'function', name: 'browser_scroll', description: 'Scroll browser', parameters: { type: 'object' } }
+  ];
+  const selected = extractClientTools({
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Click the submit button in the browser.' }] }],
+    tools
+  }, { enableSmartToolSelection: true, maxForwardedTools: 32 });
+  const others = selected.filter(tool => ['browser_click', 'browser_type', 'browser_scroll'].includes(tool.name));
+  assert.ok(others.length >= 1 && others.length <= 2, `expected 1-2 other tools, got ${others.map(t => t.name)}`);
+});
+
+test('chrome scrub strips Codex wrappers but keeps mid-message skill tags', () => {
+  const prompt = buildRelayPrompt({
+    model: 'hyperagent/sol-coder',
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<skills_instructions>huge inventory</skills_instructions>\n<skill>injected skill</skill>\nReal task.' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Please keep the <skill>user fixture</skill> tag intact.' }] }
+    ],
+    tools: []
+  }, agents[0], {});
+  assert.doesNotMatch(prompt, /huge inventory/);
+  assert.doesNotMatch(prompt, /injected skill/);
+  assert.match(prompt, /Real task\./);
+  assert.match(prompt, /<skill>user fixture<\/skill>/);
 });
 
 test('schema minimisation keeps names and argument shapes but trims descriptions', () => {

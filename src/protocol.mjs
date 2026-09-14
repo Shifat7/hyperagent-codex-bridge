@@ -152,14 +152,14 @@ function contentToText(content) {
 }
 
 function scrubCodexChrome(text) {
-  return String(text || '')
-    .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/gi, '')
-    .replace(/<plugins_instructions>[\s\S]*?<\/plugins_instructions>/gi, '')
-    .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/gi, '')
-    .replace(/<skill>[\s\S]*?<\/skill>/gi, '')
-    .replace(/<apps_instructions>[\s\S]*?<\/apps_instructions>/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  let value = String(text || '');
+  // Strip Codex wrapper blocks only. Do not delete arbitrary inline tags from user content.
+  for (const name of ['recommended_plugins', 'plugins_instructions', 'skills_instructions', 'apps_instructions']) {
+    value = value.replace(new RegExp(`<${name}>[\\s\\S]*?<\\/${name}>`, 'gi'), '');
+  }
+  // Leading <skill>…</skill> injections are Codex chrome; keep mid-message <skill> fixtures intact.
+  value = value.replace(/^(?:\s*<skill>[\s\S]*?<\/skill>\s*)+/i, '');
+  return value.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function injectedContext(text, role) {
@@ -501,6 +501,12 @@ function usedToolNames(input) {
   for (const item of input) {
     if (!item || typeof item !== 'object') continue;
     if (typeof item.name === 'string' && item.name) names.add(item.name);
+    // Tools discovered via client tool_search must count as first-use eligible.
+    if (item.type === 'tool_search_output' && Array.isArray(item.tools)) {
+      for (const tool of item.tools) {
+        if (typeof tool?.name === 'string' && tool.name) names.add(tool.name);
+      }
+    }
   }
   return names;
 }
@@ -587,7 +593,8 @@ export function shortlistTools(tools, taskType, config = {}, input = null) {
     read: 3,
     tool_search: 1,
     mcp: 0,
-    other: 0
+    // Bounded first-use slot for specialized client tools (browser_*, etc.).
+    other: 2
   };
   const used = selected.filter(tool => usedNames.has(tool.name));
   const fresh = capByCategory(selected.filter(tool => !usedNames.has(tool.name)), categoryLimits);
@@ -639,25 +646,41 @@ function relayPromptSections(body, agent, config = {}, extractedTools = null, ch
     client_tools: tools
   };
 
+  const hasApplyPatch = tools.some(tool => tool?.name === 'apply_patch');
   const headerLines = [
     "You are Codex's reasoning backend. You cannot access local resources directly; Codex owns files, shell, patches, approvals.",
     `IMPORTANT: ${toolList}`,
     'If a local action is needed, return a function_call naming one listed tool. Do not refuse. Do not say you cannot do it.',
     'Never invent a tool name. Only use names from the list above.',
-    'Prefer exec_command / apply_patch / read tools over MCP resource tools.',
-    'For apply_patch, input MUST start with "*** Begin Patch" and end with "*** End Patch".',
-    'Keep .hacb/CODEX_STATE.md and .hacb/TEST_LOG.md updated with brief local notes when the task spans multiple steps.',
+    'Prefer exec_command / apply_patch / read tools over MCP resource tools.'
+  ];
+  if (hasApplyPatch) {
+    headerLines.push('For apply_patch, input MUST start with "*** Begin Patch" and end with "*** End Patch".');
+  }
+  if (config.enableCheckpointMemory !== false) {
+    const dir = String(config.checkpointDir || '.hacb').replace(/\/+$/, '') || '.hacb';
+    const files = Array.isArray(config.checkpointFiles) && config.checkpointFiles.length
+      ? config.checkpointFiles
+      : ['CODEX_STATE.md', 'TEST_LOG.md'];
+    const noted = files.slice(0, 2).map(name => `${dir}/${name}`);
+    if (noted.length) {
+      headerLines.push(`Keep ${noted.join(' and ')} updated with brief local notes when the task spans multiple steps.`);
+    }
+  }
+  headerLines.push(
     '',
     'Return exactly one JSON object, no extra text before or after.',
     '{"type":"final","text":"your final answer to show the user"}',
     '{"type":"function_call","name":"exact tool name from the list above","arguments":{}}',
-    '{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: path\n@@\n-old\n+new\n*** End Patch"}',
+    hasApplyPatch
+      ? '{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: path\n@@\n-old\n+new\n*** End Patch"}'
+      : '{"type":"custom_tool_call","name":"exact custom tool name from the list above","input":"raw tool input"}',
     '{"type":"tool_search_call","arguments":{"query":"tool capability to find"}}',
     '',
     'After a tool result appears in the conversation, either call another tool or return final. Keep final answers concise.',
     'Your entire response must be one JSON object. Nothing else.',
     ''
-  ];
+  );
   const payloadJson = JSON.stringify(payload);
   const headerText = headerLines.join('\n');
   const prompt = [...headerLines, payloadJson].join('\n');
@@ -750,7 +773,10 @@ export function sanitizeApplyPatchInput(name, input) {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
   if (/^\*\*\* Begin Patch/m.test(trimmed)) {
-    if (!/\*\*\* End Patch\s*$/m.test(trimmed)) return `${trimmed}\n*** End Patch`;
+    if (/\*\*\* End Patch/m.test(trimmed)) return trimmed;
+    // Only auto-close when there is patch body after the Begin marker.
+    const after = trimmed.replace(/^\*\*\* Begin Patch\s*/m, '');
+    if (after.trim()) return `${trimmed}\n*** End Patch`;
     return trimmed;
   }
   // Common model misfire: raw unified diff or Codex patch body without fences.
@@ -780,10 +806,16 @@ function coerceRelayShape(parsed, tools = []) {
     return { type: 'function_call', name: typeName, arguments: args };
   }
   if (typeof parsed.name === 'string' && tools.some(item => item?.type === 'function' && item.name === parsed.name)) {
+    let args = parsed.arguments;
+    if (args == null) {
+      args = { ...parsed };
+      delete args.type;
+      delete args.name;
+    }
     return {
       type: 'function_call',
       name: parsed.name,
-      arguments: parsed.arguments != null ? parsed.arguments : {}
+      arguments: args
     };
   }
   return parsed;

@@ -21,7 +21,7 @@ import {
   VERSION
 } from './config.mjs';
 import { HyperagentClient } from './hyperagent.mjs';
-import { OpenRouterClient } from './openrouter.mjs';
+import { OpenRouterClient, openRouterSystemPromptChars } from './openrouter.mjs';
 import { loadCheckpoint } from './checkpoint.mjs';
 import { runLocalPreprocessor } from './preprocessor.mjs';
 import {
@@ -442,13 +442,24 @@ export class BridgeServer {
     try {
       const checkpoint = this.checkpointLoader ? await this.checkpointLoader(this.config) : null;
       ({ prompt, breakdown, excerpts } = buildRelayPromptWithMetrics(body, agent, this.config, tools, checkpoint?.text || null));
+      if (this.config.upstream === 'openrouter' && breakdown) {
+        const overhead = openRouterSystemPromptChars();
+        breakdown.totalChars += overhead;
+        breakdown.estimatedTokens = Math.ceil(breakdown.totalChars / 4);
+        breakdown.sections = {
+          ...breakdown.sections,
+          openRouterSystemChars: overhead
+        };
+      }
     } catch (error) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
       throw error;
     }
-    if (prompt.length > Math.max(10000, Number(this.config.maxPromptChars || 70000))) {
+    const upstreamOverheadChars = this.config.upstream === 'openrouter' ? openRouterSystemPromptChars() : 0;
+    const measuredPromptChars = prompt.length + upstreamOverheadChars;
+    if (measuredPromptChars > Math.max(10000, Number(this.config.maxPromptChars || 70000))) {
       if (idempotencyClaimed) await this.idempotencyManager.delete(keyHash, serverRequestId);
-      throw Object.assign(new Error(`Sanitized relay prompt is still too large (${prompt.length} chars). Start a new Codex chat or reduce attached context.`), { status: 413, code: 'prompt_too_large' });
+      throw Object.assign(new Error(`Sanitized relay prompt is still too large (${measuredPromptChars} chars including upstream overhead). Start a new Codex chat or reduce attached context.`), { status: 413, code: 'prompt_too_large' });
     }
     const costMetrics = {
       estimatedPromptTokens: breakdown.estimatedTokens,

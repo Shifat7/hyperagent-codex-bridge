@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 export const APP_NAME = 'hyperagent-codex-bridge';
-export const VERSION = '0.5.0';
+export const VERSION = '0.5.1';
 export const CONFIG_SCHEMA_VERSION = 2;
 export const SAFE_MAX_REQUESTS_PER_DAY = 6;
 export const DEFAULT_MCP_URL = 'https://hyperagent.com/api/mcp';
